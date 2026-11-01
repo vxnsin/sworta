@@ -575,8 +575,28 @@ impl App {
                 }
                 ui.add_space(8.0);
             }
-            Update::Installing => {
-                ui.label(RichText::new("Installing update …").color(MUTED).size(12.0));
+            Update::Installing(pct) => {
+                rule(ui, "!!", "UPDATE");
+                ui.label(
+                    RichText::new(if *pct < 100 {
+                        format!("Downloading update … {pct}%")
+                    } else {
+                        "Installing, SWORTA restarts in a moment …".to_string()
+                    })
+                    .size(12.0),
+                );
+                let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 10.0), Sense::hover());
+                dots::bar(ui.painter(), bar, *pct as f32 / 100.0, RED, DIM);
+                ui.add_space(8.0);
+            }
+            Update::Failed(e) => {
+                rule(ui, "!!", "UPDATE FAILED");
+                ui.label(RichText::new(e).color(MUTED).size(11.5));
+                if btn(ui, "TRY AGAIN", Btn::Ghost, true) {
+                    let (h, c) = (self.h.clone(), ctx.clone());
+                    std::thread::spawn(move || update::check(&h, &c, true));
+                }
+                ui.add_space(8.0);
             }
             _ => {}
         }
@@ -770,7 +790,7 @@ impl App {
             Update::Checking => "checking …".to_string(),
             Update::UpToDate => "up to date".to_string(),
             Update::Available(r) => format!("{} available", r.tag),
-            Update::Installing => "installing …".to_string(),
+            Update::Installing(p) => format!("installing {p}%"),
             Update::Failed(e) => format!("Error: {e}"),
             Update::Idle => String::new(),
         };

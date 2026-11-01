@@ -34,7 +34,7 @@ pub enum Update {
     Checking,
     UpToDate,
     Available(Release),
-    Installing,
+    Installing(u8),
     Failed(String),
 }
 
@@ -87,17 +87,31 @@ fn fetch_latest() -> Result<Option<Release>, String> {
     Ok(Some(Release { tag, url }))
 }
 
-fn download_and_swap(url: &str) -> Result<(), String> {
+fn download_and_swap(url: &str, on_percent: &mut dyn FnMut(u8)) -> Result<(), String> {
+    use std::io::Read;
     let mut resp = ureq::get(url)
         .header("User-Agent", "SWORTA")
         .call()
         .map_err(|e| e.to_string())?;
-    let bytes = resp
-        .body_mut()
-        .with_config()
-        .limit(100 * 1024 * 1024)
-        .read_to_vec()
-        .map_err(|e| e.to_string())?;
+    let total = resp.body().content_length().unwrap_or(0);
+    let mut reader = resp.body_mut().with_config().limit(100 * 1024 * 1024).reader();
+    let mut bytes = Vec::new();
+    let mut buf = [0u8; 64 * 1024];
+    let mut last = 255u8;
+    loop {
+        let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buf[..n]);
+        if total > 0 {
+            let pct = (bytes.len() as u64 * 100 / total).min(100) as u8;
+            if pct != last {
+                last = pct;
+                on_percent(pct);
+            }
+        }
+    }
     if bytes.len() < 1_000_000 || &bytes[..2] != b"MZ" {
         return Err("download is not a valid exe".into());
     }
@@ -131,9 +145,11 @@ pub fn quit(ctx: &eframe::egui::Context) {
 }
 
 pub fn install(h: &Handle, ctx: &eframe::egui::Context, release: Release, silent: bool) {
-    set(h, ctx, Update::Installing);
+    set(h, ctx, Update::Installing(0));
     let (h, ctx) = (h.clone(), ctx.clone());
-    thread::spawn(move || match download_and_swap(&release.url) {
+    thread::spawn(move || match download_and_swap(&release.url, &mut |p| {
+        set(&h, &ctx, Update::Installing(p))
+    }) {
         Ok(()) => {
             log("update installed, restarting");
             *RESTART.lock().unwrap() = Some(silent);

@@ -41,10 +41,13 @@ If you prefer, switch to normal Windows notifications or turn them off in the se
 
 Grab the latest build from [Releases](https://github.com/vxnsin/sworta/releases/latest):
 
-- `SWORTA.exe` on its own, or
-- `SWORTA.zip` with the exe and this README
+- **`SWORTA-Setup.exe`**: the installer (recommended). Installs for your user only, no admin rights needed, adds a Start menu entry and an uninstaller.
+- **`SWORTA-Portable.zip`**: no installation, just unzip somewhere permanent (for example `Documents\SWORTA`) and run `SWORTA.exe`.
+- `SWORTA.exe` on its own is the bare program the in-app updater downloads. You normally do not need it.
 
-No installer. Put the exe somewhere permanent (for example `Documents\SWORTA`) and run it. Windows SmartScreen will warn about an unknown publisher on first launch because the exe is not code-signed: click "More info", then "Run anyway".
+Windows SmartScreen will warn about an unknown publisher on first launch because the files are not code-signed: click "More info", then "Run anyway".
+
+Both variants update themselves the same way, see below.
 
 ## Settings
 
@@ -74,7 +77,7 @@ cargo build --release  # target/release/sworta.exe
 
 1. Bump `version` in `Cargo.toml`
 2. Commit and push
-3. Tag it: `git tag v0.2.0 && git push origin v0.2.0`
+3. Tag it: `git tag v0.2.1 && git push origin v0.2.1`
 
 The GitHub Action builds the exe and creates the release. The tag has to match the version in `Cargo.toml` or the build fails. Every installed SWORTA picks the update up on its own.
 
