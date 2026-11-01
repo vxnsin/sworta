@@ -29,7 +29,7 @@ const FG: Color32 = Color32::from_rgb(236, 236, 236);
 const RED: Color32 = Color32::from_rgb(215, 25, 33);
 
 const FULL: egui::Vec2 = vec2(460.0, 760.0);
-const POPUP: egui::Vec2 = vec2(390.0, 168.0);
+const POPUP: egui::Vec2 = vec2(390.0, 176.0);
 const DEMO: &str = "DEMO";
 
 const SPEEDS: [u32; 7] = [0, 10, 25, 50, 100, 200, 400];
@@ -648,13 +648,17 @@ impl App {
 
     fn job_block(&mut self, ui: &mut Ui, root: &str, p: &Progress, running: bool) {
         let done = p.state == State::Done;
-        let t = if done { "DONE".to_string() } else { format!("{}%", (p.fraction() * 100.0) as u32) };
+        let t = if done {
+            (if p.cancelled { "STOPPED" } else { "DONE" }).to_string()
+        } else {
+            format!("{}%", (p.fraction() * 100.0) as u32)
+        };
         ui.add_space(4.0);
         dot_text(ui, &t, 7.0, if done { RED } else { FG });
         let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 12.0), Sense::hover());
         dots::bar(ui.painter(), bar, p.fraction(), RED, DIM);
         let line = if done {
-            format!("{} copied · {} skipped · {} failed", p.copied, p.skipped, p.failed)
+            format!("{}{} copied · {} skipped · {} failed", if p.cancelled { "cancelled · " } else { "" }, p.copied, p.skipped, p.failed)
         } else {
             format!(
                 "{}/{} files · {} · ETA {}",
@@ -667,6 +671,9 @@ impl App {
         ui.label(RichText::new(line).color(MUTED).size(11.5));
         if running {
             ui.label(RichText::new(&p.current).color(MUTED).size(11.0));
+            if btn(ui, "CANCEL", Btn::Ghost, true) {
+                engine::cancel_import(&self.h, root);
+            }
         }
         if done {
             ui.horizontal(|ui| {
@@ -842,7 +849,8 @@ impl App {
         }
         let p = ui.painter().clone();
         p.circle_filled(pos2(bar.left() + 20.0, bar.center().y), 3.5, RED);
-        let head = if done { "DONE" } else if running { "IMPORTING" } else { "CARD DETECTED" };
+        let cancelled = job.is_some_and(|j| j.cancelled);
+        let head = if done { if cancelled { "CANCELLED" } else { "DONE" } } else if running { "IMPORTING" } else { "CARD DETECTED" };
         p.text(pos2(bar.left() + 34.0, bar.center().y), Align2::LEFT_CENTER, head, FontId::monospace(11.0), MUTED);
         let x = Rect::from_center_size(pos2(bar.right() - 22.0, bar.center().y), vec2(26.0, 26.0));
         let xr = ui.interact(x, egui::Id::new("popup_close"), Sense::click());
@@ -881,6 +889,9 @@ impl App {
                     format!("{}% · {} · ETA {}", (j.fraction() * 100.0) as u32, fmt_speed(j.speed()), fmt_eta(j))
                 };
                 ui.label(RichText::new(line).color(MUTED).size(11.0));
+                if running && btn(ui, "CANCEL", Btn::Ghost, true) {
+                    engine::cancel_import(&self.h, &key);
+                }
             } else {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {

@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, LazyLock, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, Instant, SystemTime},
@@ -69,6 +69,8 @@ pub struct Progress {
     pub skipped: usize,
     pub failed: usize,
     pub dest: PathBuf,
+    pub cancel: Arc<AtomicBool>,
+    pub cancelled: bool,
     pub started: Option<Instant>,
     pub ended: Option<Instant>,
 }
@@ -254,7 +256,7 @@ fn throttle(limit_mb: u32, bytes: u64) {
 }
 
 pub fn start_import(h: &Handle, ctx: &eframe::egui::Context, root: &str, dest: PathBuf) {
-    let (card, long_date, workers) = {
+    let (card, long_date, workers, cancel) = {
         let mut g = h.lock().unwrap();
         if g.jobs.get(root).is_some_and(|p| p.state == State::Running) {
             return;
@@ -265,6 +267,7 @@ pub fn start_import(h: &Handle, ctx: &eframe::egui::Context, root: &str, dest: P
         if card.items.is_empty() {
             return;
         }
+        let cancel = Arc::new(AtomicBool::new(false));
         g.jobs.insert(
             root.to_string(),
             Progress {
@@ -272,21 +275,25 @@ pub fn start_import(h: &Handle, ctx: &eframe::egui::Context, root: &str, dest: P
                 files_total: card.items.len(),
                 bytes_total: card.bytes,
                 dest: dest.clone(),
+                cancel: cancel.clone(),
                 started: Some(Instant::now()),
                 ..Default::default()
             },
         );
         let s = &g.settings;
-        (card, s.long_date, s.parallel.clamp(1, 4) as usize)
+        (card, s.long_date, s.parallel.clamp(1, 4) as usize, cancel)
     };
 
     let next = Arc::new(AtomicUsize::new(0));
     let alive = Arc::new(AtomicUsize::new(workers));
     for _ in 0..workers {
         let (h, ctx, card, dest) = (h.clone(), ctx.clone(), card.clone(), dest.clone());
-        let (next, alive, root) = (next.clone(), alive.clone(), root.to_string());
+        let (next, alive, root, cancel) = (next.clone(), alive.clone(), root.to_string(), cancel.clone());
         thread::spawn(move || {
             loop {
+                if cancel.load(Ordering::SeqCst) {
+                    break;
+                }
                 let i = next.fetch_add(1, Ordering::SeqCst);
                 let Some(it) = card.items.get(i) else { break };
                 if let Some(p) = h.lock().unwrap().jobs.get_mut(&root) {
@@ -310,6 +317,7 @@ pub fn start_import(h: &Handle, ctx: &eframe::egui::Context, root: &str, dest: P
                     };
                     throttle(limit, n);
                     ctx.request_repaint();
+                    !cancel.load(Ordering::SeqCst)
                 });
 
                 let mut g = h.lock().unwrap();
@@ -321,6 +329,7 @@ pub fn start_import(h: &Handle, ctx: &eframe::egui::Context, root: &str, dest: P
                             p.skipped += 1;
                             p.bytes_done += it.size;
                         }
+                        Err(_) if cancel.load(Ordering::SeqCst) => {}
                         Err(_) => p.failed += 1,
                     }
                 }
@@ -341,18 +350,27 @@ fn finish(h: &Handle, ctx: &eframe::egui::Context, root: &str, dest: &Path) {
         let open = g.settings.open_when_done;
         let Some(p) = g.jobs.get_mut(root) else { return };
         p.state = State::Done;
+        p.cancelled = p.cancel.load(Ordering::SeqCst);
         p.ended = Some(Instant::now());
         p.current.clear();
         (p.clone(), mode, open)
     };
     ctx.request_repaint();
-    if open {
+    if open && !p.cancelled {
         let _ = std::process::Command::new("explorer").arg(dest).spawn();
     }
     if mode == Notify::Toast {
         let body = format!("{} copied  ·  {} skipped  ·  {} failed", p.copied, p.skipped, p.failed);
+        let title = if p.cancelled { "SWORTA – Cancelled" } else { "SWORTA – Done" };
         let (h2, ctx2) = (h.clone(), ctx.clone());
-        toast("SWORTA – Done", &body, None, move |_| show_window(&h2, &ctx2));
+        toast(title, &body, None, move |_| show_window(&h2, &ctx2));
+    }
+}
+
+/// Stops a running import; files already copied stay, the half-written one is removed.
+pub fn cancel_import(h: &Handle, root: &str) {
+    if let Some(p) = h.lock().unwrap().jobs.get(root) {
+        p.cancel.store(true, Ordering::SeqCst);
     }
 }
 
@@ -363,7 +381,7 @@ fn same_mtime(md: &fs::Metadata, t: SystemTime) -> bool {
 }
 
 /// Ok(true) = copied, Ok(false) = already present (skipped).
-fn copy_one(it: &Item, dir: &Path, on_bytes: &mut dyn FnMut(u64)) -> std::io::Result<bool> {
+fn copy_one(it: &Item, dir: &Path, on_bytes: &mut dyn FnMut(u64) -> bool) -> std::io::Result<bool> {
     fs::create_dir_all(dir)?;
     let name = it.src.file_name().unwrap().to_string_lossy().into_owned();
     let (stem, extn) = match name.rsplit_once('.') {
@@ -398,7 +416,7 @@ fn copy_one(it: &Item, dir: &Path, on_bytes: &mut dyn FnMut(u64)) -> std::io::Re
     res.map(|_| true)
 }
 
-fn write_file(it: &Item, target: &Path, on_bytes: &mut dyn FnMut(u64)) -> std::io::Result<()> {
+fn write_file(it: &Item, target: &Path, on_bytes: &mut dyn FnMut(u64) -> bool) -> std::io::Result<()> {
     let part = target.with_file_name(format!("{}.part", target.file_name().unwrap().to_string_lossy()));
     let mut src = fs::File::open(&it.src)?;
     let mtime = src.metadata()?.modified().ok();
@@ -411,7 +429,9 @@ fn write_file(it: &Item, target: &Path, on_bytes: &mut dyn FnMut(u64)) -> std::i
                 break;
             }
             out.write_all(&buf[..r])?;
-            on_bytes(r as u64);
+            if !on_bytes(r as u64) {
+                return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"));
+            }
         }
         out.flush()
     })();

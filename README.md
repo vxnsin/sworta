@@ -22,6 +22,7 @@ The folder name is the capture date (`YYMMDD` or `YYYY-MM-DD`), taken from the f
 
 - Detects SD cards and USB drives that contain a `DCIM` folder
 - Asks for the destination folder on every import, because every shoot goes somewhere else (can be switched to a fixed folder)
+- Imports can be cancelled at any time; files already copied stay, the half-written one is removed
 - Several cards can import at the same time, and several files per card are copied in parallel
 - Optional speed limit so the import does not choke your drive or network
 - Files that already exist at the destination (same name, size and time) are skipped
@@ -77,7 +78,7 @@ cargo build --release  # target/release/sworta.exe
 
 1. Bump `version` in `Cargo.toml`
 2. Commit and push
-3. Tag it: `git tag v0.2.1 && git push origin v0.2.1`
+3. Tag it: `git tag v0.2.2 && git push origin v0.2.2`
 
 The GitHub Action builds the exe and creates the release. The tag has to match the version in `Cargo.toml` or the build fails. Every installed SWORTA picks the update up on its own.
 
