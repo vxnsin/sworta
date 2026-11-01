@@ -1,0 +1,41 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag muss zur Cargo-Version passen
+        shell: bash
+        run: |
+          ver=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)
+          if [ "v$ver" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} passt nicht zu Cargo.toml ($ver)"; exit 1
+          fi
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Pakete
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist/SWORTA | Out-Null
+          Copy-Item target/release/sworta.exe dist/SWORTA.exe
+          Copy-Item target/release/sworta.exe dist/SWORTA/SWORTA.exe
+          Copy-Item README.md dist/SWORTA/README.md
+          Compress-Archive -Path dist/SWORTA -DestinationPath dist/SWORTA.zip
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/SWORTA.exe dist/SWORTA.zip --title "SWORTA ${{ github.ref_name }}" --generate-notes
