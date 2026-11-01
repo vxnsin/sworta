@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use crate::engine::{self, Handle, State};
+use crate::engine::{self, Handle};
 
 const REPO: &str = "vxnsin/sworta";
 const ASSET: &str = "SWORTA.exe";
@@ -74,7 +74,7 @@ fn fetch_latest() -> Result<Option<Release>, String> {
         Err(e) => return Err(e.to_string()),
     };
     let v: serde_json::Value = resp.body_mut().read_json().map_err(|e| e.to_string())?;
-    let tag = v["tag_name"].as_str().ok_or("kein tag_name")?.to_string();
+    let tag = v["tag_name"].as_str().ok_or("no tag_name")?.to_string();
     if parse(&tag) <= parse(env!("CARGO_PKG_VERSION")) {
         return Ok(None);
     }
@@ -82,7 +82,7 @@ fn fetch_latest() -> Result<Option<Release>, String> {
         .as_array()
         .and_then(|a| a.iter().find(|x| x["name"] == ASSET))
         .and_then(|x| x["browser_download_url"].as_str())
-        .ok_or("Release enthält keine SWORTA.exe")?
+        .ok_or("release has no SWORTA.exe")?
         .to_string();
     Ok(Some(Release { tag, url }))
 }
@@ -99,10 +99,10 @@ fn download_and_swap(url: &str) -> Result<(), String> {
         .read_to_vec()
         .map_err(|e| e.to_string())?;
     if bytes.len() < 1_000_000 || &bytes[..2] != b"MZ" {
-        return Err("Download ist keine gültige Exe".into());
+        return Err("download is not a valid exe".into());
     }
 
-    let exe = current_exe().ok_or("Exe-Pfad unbekannt")?;
+    let exe = current_exe().ok_or("exe path unknown")?;
     let old = exe.with_extension("old");
     let new = exe.with_extension("new");
     fs::write(&new, &bytes).map_err(|e| e.to_string())?;
@@ -155,7 +155,7 @@ pub fn check(h: &Handle, ctx: &eframe::egui::Context, user_started: bool) {
             log(&format!("found {}", rel.tag));
             let (auto, busy) = {
                 let g = h.lock().unwrap();
-                (g.settings.auto_update, g.progress.state == State::Running)
+                (g.settings.auto_update, engine::any_running(&g))
             };
             if auto && !busy && !user_started {
                 install(h, ctx, rel, true);
@@ -163,13 +163,13 @@ pub fn check(h: &Handle, ctx: &eframe::egui::Context, user_started: bool) {
             }
             let already = matches!(&h.lock().unwrap().update, Update::Available(r) if *r == rel);
             set(h, ctx, Update::Available(rel.clone()));
-            if !already && h.lock().unwrap().settings.notify && !user_started {
-                let ctx2 = ctx.clone();
+            if !already && h.lock().unwrap().settings.notify != crate::config::Notify::Off && !user_started {
+                let (h2, ctx2) = (h.clone(), ctx.clone());
                 engine::toast(
-                    "SWORTA – Update verfügbar",
-                    &format!("Version {} steht bereit.", rel.tag),
+                    "SWORTA – Update available",
+                    &format!("Version {} is ready.", rel.tag),
                     None,
-                    move |_| engine::show_window(&ctx2),
+                    move |_| engine::show_window(&h2, &ctx2),
                 );
             }
         }

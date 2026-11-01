@@ -1,15 +1,18 @@
 use chrono::{DateTime, Local};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, LazyLock, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     thread,
-    time::Duration,
+    time::{Duration, Instant, SystemTime},
 };
 
-use crate::config::Settings;
+use crate::config::{Notify, Settings};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Kind {
@@ -32,7 +35,7 @@ impl Kind {
 pub struct Item {
     pub src: PathBuf,
     pub kind: Kind,
-    pub date: String,
+    pub mtime: SystemTime,
     pub size: u64,
 }
 
@@ -65,16 +68,43 @@ pub struct Progress {
     pub copied: usize,
     pub skipped: usize,
     pub failed: usize,
+    pub dest: PathBuf,
+    pub started: Option<Instant>,
+    pub ended: Option<Instant>,
+}
+
+impl Progress {
+    pub fn fraction(&self) -> f32 {
+        if self.bytes_total == 0 {
+            return if self.state == State::Done { 1.0 } else { 0.0 };
+        }
+        (self.bytes_done as f32 / self.bytes_total as f32).min(1.0)
+    }
+
+    /// Average bytes per second since the job started.
+    pub fn speed(&self) -> f64 {
+        let Some(start) = self.started else { return 0.0 };
+        let secs = self.ended.unwrap_or_else(Instant::now).duration_since(start).as_secs_f64();
+        if secs < 0.5 { 0.0 } else { self.bytes_done as f64 / secs }
+    }
 }
 
 pub struct Shared {
     pub cards: Vec<Card>,
-    pub progress: Progress,
+    /// One job per drive root, kept until the user dismisses it.
+    pub jobs: HashMap<String, Progress>,
     pub settings: Settings,
     pub update: crate::update::Update,
+    /// Set by background threads, picked up by the UI thread.
+    pub popup_request: Option<String>,
+    pub want_full: bool,
 }
 
 pub type Handle = Arc<Mutex<Shared>>;
+
+pub fn any_running(g: &Shared) -> bool {
+    g.jobs.values().any(|p| p.state == State::Running)
+}
 
 fn walk(dir: &Path, f: &mut dyn FnMut(&Path, &fs::Metadata)) {
     let Ok(rd) = fs::read_dir(dir) else { return };
@@ -89,35 +119,30 @@ fn walk(dir: &Path, f: &mut dyn FnMut(&Path, &fs::Metadata)) {
     }
 }
 
+fn ext(p: &Path) -> String {
+    p.extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default()
+}
+
 fn scan(root: &str) -> Card {
     let mut items = Vec::new();
     let base = Path::new(root);
     let mut add = |kind: Kind, p: &Path, md: &fs::Metadata| {
-        let Ok(mt) = md.modified() else { return };
-        let dt: DateTime<Local> = mt.into();
-        items.push(Item {
-            src: p.to_path_buf(),
-            kind,
-            date: dt.format("%y%m%d").to_string(),
-            size: md.len(),
-        });
+        let Ok(mtime) = md.modified() else { return };
+        items.push(Item { src: p.to_path_buf(), kind, mtime, size: md.len() });
     };
 
-    walk(&base.join("DCIM"), &mut |p, md| {
-        match ext(p).as_str() {
-            "jpg" | "jpeg" => add(Kind::Jpg, p, md),
-            "arw" => add(Kind::Raw, p, md),
-            _ => {}
+    walk(&base.join("DCIM"), &mut |p, md| match ext(p).as_str() {
+        "jpg" | "jpeg" => add(Kind::Jpg, p, md),
+        "arw" => add(Kind::Raw, p, md),
+        _ => {}
+    });
+    walk(&base.join("PRIVATE").join("M4ROOT").join("CLIP"), &mut |p, md| {
+        if matches!(ext(p).as_str(), "mp4" | "xml") {
+            add(Kind::Vid, p, md);
         }
     });
-    walk(
-        &base.join("PRIVATE").join("M4ROOT").join("CLIP"),
-        &mut |p, md| {
-            if matches!(ext(p).as_str(), "mp4" | "xml") {
-                add(Kind::Vid, p, md);
-            }
-        },
-    );
 
     items.sort_by(|a, b| a.src.cmp(&b.src));
     let count = |k: Kind| items.iter().filter(|i| i.kind == k).count();
@@ -131,17 +156,9 @@ fn scan(root: &str) -> Card {
     }
 }
 
-fn ext(p: &Path) -> String {
-    p.extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default()
-}
-
-pub fn show_window(ctx: &eframe::egui::Context) {
-    use eframe::egui::ViewportCommand as C;
-    ctx.send_viewport_cmd(C::Visible(true));
-    ctx.send_viewport_cmd(C::Minimized(false));
-    ctx.send_viewport_cmd(C::Focus);
+/// Asks the UI thread to open the full window.
+pub fn show_window(h: &Handle, ctx: &eframe::egui::Context) {
+    h.lock().unwrap().want_full = true;
     ctx.request_repaint();
 }
 
@@ -153,7 +170,7 @@ pub fn toast(title: &str, body: &str, button: Option<&str>, on_click: impl Fn(bo
     }
     let _ = t
         .on_activated(move |action| {
-            on_click(action.map_or(false, |a| a.contains("import")));
+            on_click(action.is_some_and(|a| a.contains("import")));
             Ok(())
         })
         .show();
@@ -175,23 +192,34 @@ pub fn spawn_watcher(h: Handle, ctx: eframe::egui::Context) {
                 let present = Path::new(&format!("{root}DCIM")).is_dir();
                 if present && known.insert(l) {
                     let card = scan(&root);
-                    let notify = {
+                    let (mode, auto) = {
                         let mut g = h.lock().unwrap();
                         g.cards.push(card.clone());
-                        g.settings.notify
+                        // A fresh card replaces the finished job of the same letter.
+                        if g.jobs.get(&root).is_some_and(|p| p.state == State::Done) {
+                            g.jobs.remove(&root);
+                        }
+                        if g.settings.notify == Notify::Popup {
+                            g.popup_request = Some(root.clone());
+                        }
+                        (g.settings.notify, g.settings.auto_import)
                     };
-                    if notify {
+                    if mode == Notify::Toast {
                         let body = format!(
                             "{root}  ·  {} JPG  ·  {} RAW  ·  {} VID",
                             card.jpg, card.raw, card.vid
                         );
                         let (h2, ctx2, root2) = (h.clone(), ctx.clone(), root.clone());
-                        toast("SWORTA – Karte erkannt", &body, Some("Importieren"), move |import| {
-                            show_window(&ctx2);
+                        toast("SWORTA – Card detected", &body, Some("Import"), move |import| {
+                            show_window(&h2, &ctx2);
                             if import {
-                                start_import(&h2, &ctx2, &root2);
+                                begin_import(&h2, &ctx2, &root2);
                             }
                         });
+                    }
+                    if auto {
+                        let dest = h.lock().unwrap().settings.dest.clone();
+                        start_import(&h, &ctx, &root, dest);
                     }
                     ctx.request_repaint();
                 } else if !present && known.remove(&l) {
@@ -204,70 +232,134 @@ pub fn spawn_watcher(h: Handle, ctx: eframe::egui::Context) {
     });
 }
 
-pub fn start_import(h: &Handle, ctx: &eframe::egui::Context, root: &str) {
-    let (card, dest, notify) = {
+static RESERVED: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Default::default);
+static NEXT_SLOT: LazyLock<Mutex<Instant>> = LazyLock::new(|| Mutex::new(Instant::now()));
+
+/// Shared speed cap across every running copy thread.
+fn throttle(limit_mb: u32, bytes: u64) {
+    if limit_mb == 0 {
+        return;
+    }
+    let cost = Duration::from_secs_f64(bytes as f64 / (limit_mb as f64 * 1e6));
+    let wait = {
+        let mut next = NEXT_SLOT.lock().unwrap();
+        let now = Instant::now();
+        let start = (*next).max(now);
+        *next = start + cost;
+        start.saturating_duration_since(now)
+    };
+    if !wait.is_zero() {
+        thread::sleep(wait);
+    }
+}
+
+pub fn start_import(h: &Handle, ctx: &eframe::egui::Context, root: &str, dest: PathBuf) {
+    let (card, long_date, workers) = {
         let mut g = h.lock().unwrap();
-        if g.progress.state == State::Running {
+        if g.jobs.get(root).is_some_and(|p| p.state == State::Running) {
             return;
         }
         let Some(card) = g.cards.iter().find(|c| c.root == root).cloned() else {
             return;
         };
-        g.progress = Progress {
-            state: State::Running,
-            files_total: card.items.len(),
-            bytes_total: card.bytes,
-            ..Default::default()
-        };
-        (card, g.settings.dest.clone(), g.settings.notify)
+        if card.items.is_empty() {
+            return;
+        }
+        g.jobs.insert(
+            root.to_string(),
+            Progress {
+                state: State::Running,
+                files_total: card.items.len(),
+                bytes_total: card.bytes,
+                dest: dest.clone(),
+                started: Some(Instant::now()),
+                ..Default::default()
+            },
+        );
+        let s = &g.settings;
+        (card, s.long_date, s.parallel.clamp(1, 4) as usize)
     };
 
-    let (h, ctx) = (h.clone(), ctx.clone());
-    thread::spawn(move || {
-        for it in card.items.iter() {
-            {
-                let mut g = h.lock().unwrap();
-                g.progress.current = it
-                    .src
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-            }
-            let dir = dest.join(&it.date).join(it.kind.dir());
-            let res = copy_one(it, &dir, &mut |n| {
-                h.lock().unwrap().progress.bytes_done += n;
-                ctx.request_repaint();
-            });
-            let mut g = h.lock().unwrap();
-            g.progress.files_done += 1;
-            match res {
-                Ok(true) => g.progress.copied += 1,
-                Ok(false) => {
-                    g.progress.skipped += 1;
-                    g.progress.bytes_done += it.size;
+    let next = Arc::new(AtomicUsize::new(0));
+    let alive = Arc::new(AtomicUsize::new(workers));
+    for _ in 0..workers {
+        let (h, ctx, card, dest) = (h.clone(), ctx.clone(), card.clone(), dest.clone());
+        let (next, alive, root) = (next.clone(), alive.clone(), root.to_string());
+        thread::spawn(move || {
+            loop {
+                let i = next.fetch_add(1, Ordering::SeqCst);
+                let Some(it) = card.items.get(i) else { break };
+                if let Some(p) = h.lock().unwrap().jobs.get_mut(&root) {
+                    p.current = it
+                        .src
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
                 }
-                Err(_) => g.progress.failed += 1,
-            }
-            drop(g);
-            ctx.request_repaint();
-        }
+                let dt: DateTime<Local> = it.mtime.into();
+                let date = dt.format(if long_date { "%Y-%m-%d" } else { "%y%m%d" }).to_string();
+                let dir = dest.join(date).join(it.kind.dir());
 
-        let p = {
-            let mut g = h.lock().unwrap();
-            g.progress.state = State::Done;
-            g.progress.current.clear();
-            g.progress.clone()
-        };
-        ctx.request_repaint();
-        if notify {
-            let body = format!(
-                "{} kopiert  ·  {} übersprungen  ·  {} Fehler",
-                p.copied, p.skipped, p.failed
-            );
-            let ctx2 = ctx.clone();
-            toast("SWORTA – Fertig", &body, None, move |_| show_window(&ctx2));
-        }
-    });
+                let res = copy_one(it, &dir, &mut |n| {
+                    let limit = {
+                        let mut g = h.lock().unwrap();
+                        if let Some(p) = g.jobs.get_mut(&root) {
+                            p.bytes_done += n;
+                        }
+                        g.settings.speed_limit
+                    };
+                    throttle(limit, n);
+                    ctx.request_repaint();
+                });
+
+                let mut g = h.lock().unwrap();
+                if let Some(p) = g.jobs.get_mut(&root) {
+                    p.files_done += 1;
+                    match res {
+                        Ok(true) => p.copied += 1,
+                        Ok(false) => {
+                            p.skipped += 1;
+                            p.bytes_done += it.size;
+                        }
+                        Err(_) => p.failed += 1,
+                    }
+                }
+                drop(g);
+                ctx.request_repaint();
+            }
+            if alive.fetch_sub(1, Ordering::SeqCst) == 1 {
+                finish(&h, &ctx, &root, &dest);
+            }
+        });
+    }
+}
+
+fn finish(h: &Handle, ctx: &eframe::egui::Context, root: &str, dest: &Path) {
+    let (p, mode, open) = {
+        let mut g = h.lock().unwrap();
+        let mode = g.settings.notify;
+        let open = g.settings.open_when_done;
+        let Some(p) = g.jobs.get_mut(root) else { return };
+        p.state = State::Done;
+        p.ended = Some(Instant::now());
+        p.current.clear();
+        (p.clone(), mode, open)
+    };
+    ctx.request_repaint();
+    if open {
+        let _ = std::process::Command::new("explorer").arg(dest).spawn();
+    }
+    if mode == Notify::Toast {
+        let body = format!("{} copied  ·  {} skipped  ·  {} failed", p.copied, p.skipped, p.failed);
+        let (h2, ctx2) = (h.clone(), ctx.clone());
+        toast("SWORTA – Done", &body, None, move |_| show_window(&h2, &ctx2));
+    }
+}
+
+fn same_mtime(md: &fs::Metadata, t: SystemTime) -> bool {
+    let Ok(m) = md.modified() else { return false };
+    let diff = m.duration_since(t).or_else(|_| t.duration_since(m)).unwrap_or_default();
+    diff <= Duration::from_secs(2)
 }
 
 /// Ok(true) = copied, Ok(false) = already present (skipped).
@@ -279,34 +371,84 @@ fn copy_one(it: &Item, dir: &Path, on_bytes: &mut dyn FnMut(u64)) -> std::io::Re
         None => (name.clone(), String::new()),
     };
 
-    let mut target = dir.join(&name);
+    // Same name, size and time counts as already imported. Anything else
+    // gets a suffix, and parallel copies reserve their target name.
     let mut n = 0;
-    while let Ok(md) = fs::metadata(&target) {
-        if md.len() == it.size {
-            return Ok(false);
+    let target = loop {
+        let cand = if n == 0 {
+            dir.join(&name)
+        } else {
+            dir.join(format!("{stem}_{n}{extn}"))
+        };
+        let mut reserved = RESERVED.lock().unwrap();
+        match fs::metadata(&cand) {
+            Ok(md) if md.len() == it.size && same_mtime(&md, it.mtime) => return Ok(false),
+            Ok(_) => {}
+            Err(_) => {
+                if reserved.insert(cand.clone()) {
+                    break cand;
+                }
+            }
         }
         n += 1;
-        target = dir.join(format!("{stem}_{n}{extn}"));
-    }
+    };
 
-    let part = dir.join(format!("{}.part", target.file_name().unwrap().to_string_lossy()));
+    let res = write_file(it, &target, on_bytes);
+    RESERVED.lock().unwrap().remove(&target);
+    res.map(|_| true)
+}
+
+fn write_file(it: &Item, target: &Path, on_bytes: &mut dyn FnMut(u64)) -> std::io::Result<()> {
+    let part = target.with_file_name(format!("{}.part", target.file_name().unwrap().to_string_lossy()));
     let mut src = fs::File::open(&it.src)?;
     let mtime = src.metadata()?.modified().ok();
     let mut out = fs::File::create(&part)?;
     let mut buf = vec![0u8; 1 << 20];
-    loop {
-        let r = src.read(&mut buf)?;
-        if r == 0 {
-            break;
+    let copied = (|| -> std::io::Result<()> {
+        loop {
+            let r = src.read(&mut buf)?;
+            if r == 0 {
+                break;
+            }
+            out.write_all(&buf[..r])?;
+            on_bytes(r as u64);
         }
-        out.write_all(&buf[..r])?;
-        on_bytes(r as u64);
+        out.flush()
+    })();
+    if let Err(e) = copied {
+        drop(out);
+        let _ = fs::remove_file(&part);
+        return Err(e);
     }
-    out.flush()?;
     if let Some(t) = mtime {
         let _ = out.set_modified(t);
     }
     drop(out);
-    fs::rename(&part, &target)?;
-    Ok(true)
+    fs::rename(&part, target)
+}
+
+/// Starts an import, asking for the destination first when that setting is on.
+pub fn begin_import(h: &Handle, ctx: &eframe::egui::Context, root: &str) {
+    let (h, ctx, root) = (h.clone(), ctx.clone(), root.to_string());
+    thread::spawn(move || {
+        let (ask, last) = {
+            let g = h.lock().unwrap();
+            (g.settings.ask_dest, g.settings.dest.clone())
+        };
+        let dest = if ask {
+            let start = if last.exists() { last.clone() } else { last.parent().map(Path::to_path_buf).unwrap_or(last.clone()) };
+            let picked = rfd::FileDialog::new()
+                .set_title(format!("Destination folder for {root}"))
+                .set_directory(start)
+                .pick_folder();
+            let Some(p) = picked else { return };
+            let mut g = h.lock().unwrap();
+            g.settings.dest = p.clone();
+            crate::config::save(&g.settings);
+            p
+        } else {
+            last
+        };
+        start_import(&h, &ctx, &root, dest);
+    });
 }

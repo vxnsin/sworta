@@ -1,6 +1,6 @@
 # SWORTA
 
-A small Windows tray app that sorts your camera card for you. Plug in the card, click import, done.
+A small Windows tray app that sorts your camera card for you. Plug in the card, pick a folder, click import, done.
 
 Built for Sony cameras (Alpha series), where photos sit in `DCIM` subfolders and video clips hide in `PRIVATE/M4ROOT/CLIP`. SWORTA stays quiet in the tray and only speaks up when a card or USB drive with a `DCIM` folder shows up.
 
@@ -18,14 +18,24 @@ Destination/
     └── VID/    .MP4 and .XML from PRIVATE/M4ROOT/CLIP
 ```
 
-The folder name is the capture date as `YYMMDD`, taken from the file's modified time. A shoot that spans two days lands in two folders.
+The folder name is the capture date (`YYMMDD` or `YYYY-MM-DD`), taken from the file's modified time. A shoot that spans two days lands in two folders.
 
-- Detects SD cards and USB drives that contain a `DCIM` folder and shows a notification
-- Import from the notification or from the window
-- Files that already exist at the destination (same name, same size) are skipped
+- Detects SD cards and USB drives that contain a `DCIM` folder
+- Asks for the destination folder on every import, because every shoot goes somewhere else (can be switched to a fixed folder)
+- Several cards can import at the same time, and several files per card are copied in parallel
+- Optional speed limit so the import does not choke your drive or network
+- Files that already exist at the destination (same name, size and time) are skipped
 - Same name but a different file gets a `_1` suffix instead of being overwritten
 - Original modified times are kept
 - Nothing is ever deleted from the card
+
+## Notifications
+
+When a card shows up, a small popup appears in the corner of your screen with the card contents and an import button. It stays for a few seconds (or until you close it) and turns into a progress view once the import runs.
+
+![Popup](docs/popup.png)
+
+If you prefer, switch to normal Windows notifications or turn them off in the settings. "Preview popup" shows you what it looks like.
 
 ## Download
 
@@ -40,10 +50,10 @@ No installer. Put the exe somewhere permanent (for example `Documents\SWORTA`) a
 
 ![Settings](docs/settings.png)
 
-- **Destination folder**: defaults to `Pictures\SWORTA`
-- **Start with Windows**: runs hidden in the tray on login
-- **Notify on card**: turn it off if you would rather open the window yourself
-- **Update automatically**: see below
+- **Destination**: ask on every import, or use a fixed folder; folder name format
+- **Import**: speed limit, files at once (1 to 4 per card), auto import into the last folder, open the folder when done
+- **Notifications**: popup, Windows toast or off, and how long the popup stays
+- **System**: start with Windows (runs hidden in the tray), automatic updates
 
 Settings live in `%APPDATA%\SWORTA\settings.json`.
 

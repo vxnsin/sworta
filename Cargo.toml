@@ -1,6 +1,6 @@
 [package]
 name = "sworta"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -13,6 +13,7 @@ single-instance = "0.3.3"
 tauri-winrt-notification = "0.8.1"
 tray-icon = "0.26.1"
 ureq = { version = "3.5.0", features = ["json"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 winreg = "0.56.0"
 
 [profile.release]
