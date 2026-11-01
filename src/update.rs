@@ -49,9 +49,17 @@ fn current_exe() -> Option<PathBuf> {
 
 /// Leftover from the previous version after an update.
 pub fn cleanup_old() {
-    if let Some(exe) = current_exe() {
-        let _ = fs::remove_file(exe.with_extension("old"));
-    }
+    let Some(exe) = current_exe() else { return };
+    let old = exe.with_extension("old");
+    // The previous process may still be shutting down and hold the file.
+    thread::spawn(move || {
+        for _ in 0..30 {
+            if !old.exists() || fs::remove_file(&old).is_ok() {
+                return;
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+    });
 }
 
 fn fetch_latest() -> Result<Option<Release>, String> {
@@ -127,18 +135,24 @@ pub fn install(h: &Handle, ctx: &eframe::egui::Context, release: Release, silent
     let (h, ctx) = (h.clone(), ctx.clone());
     thread::spawn(move || match download_and_swap(&release.url) {
         Ok(()) => {
+            log("update installed, restarting");
             *RESTART.lock().unwrap() = Some(silent);
             quit(&ctx);
         }
-        Err(e) => set(&h, &ctx, Update::Failed(e)),
+        Err(e) => {
+            log(&format!("install failed: {e}"));
+            set(&h, &ctx, Update::Failed(e))
+        }
     });
 }
 
 /// Checks GitHub once; installs right away when `auto` is on and no import runs.
 pub fn check(h: &Handle, ctx: &eframe::egui::Context, user_started: bool) {
     set(h, ctx, Update::Checking);
+    log("check start");
     match fetch_latest() {
         Ok(Some(rel)) => {
+            log(&format!("found {}", rel.tag));
             let (auto, busy) = {
                 let g = h.lock().unwrap();
                 (g.settings.auto_update, g.progress.state == State::Running)
@@ -159,8 +173,14 @@ pub fn check(h: &Handle, ctx: &eframe::egui::Context, user_started: bool) {
                 );
             }
         }
-        Ok(None) => set(h, ctx, Update::UpToDate),
-        Err(e) => set(h, ctx, if user_started { Update::Failed(e) } else { Update::Idle }),
+        Ok(None) => {
+            log("up to date");
+            set(h, ctx, Update::UpToDate)
+        }
+        Err(e) => {
+            log(&format!("check failed: {e}"));
+            set(h, ctx, if user_started { Update::Failed(e) } else { Update::Idle })
+        }
     }
 }
 
@@ -172,4 +192,14 @@ pub fn spawn_checker(h: Handle, ctx: eframe::egui::Context) {
             thread::sleep(CHECK_EVERY);
         }
     });
+}
+
+fn log(msg: &str) {
+    use std::io::Write;
+    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
+    let dir = PathBuf::from(base).join("SWORTA");
+    let _ = fs::create_dir_all(&dir);
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(dir.join("update.log")) {
+        let _ = writeln!(f, "{} {msg}", chrono::Local::now().format("%F %T"));
+    }
 }

@@ -1,73 +1,73 @@
 # SWORTA
 
-Ein kleines Windows-Programm, das Fotos und Videos von der Kamerakarte in Sekunden sauber sortiert. Karte rein, einmal auf "Importieren" klicken, fertig. Gebaut für Sony-Kameras (Alpha-Serie), weil dort alles in einem Wust aus `DCIM`-Unterordnern und `M4ROOT/CLIP` liegt.
+A small Windows tray app that sorts your camera card for you. Plug in the card, click import, done.
 
-SWORTA sitzt im Tray, braucht kaum Ressourcen und meldet sich nur, wenn wirklich eine Karte mit `DCIM`-Ordner im Rechner steckt.
+Built for Sony cameras (Alpha series), where photos sit in `DCIM` subfolders and video clips hide in `PRIVATE/M4ROOT/CLIP`. SWORTA stays quiet in the tray and only speaks up when a card or USB drive with a `DCIM` folder shows up.
 
-![Startseite](docs/home.png)
+![Home](docs/home.png)
 
-## Was es macht
+## What it does
 
-Alles landet in einem Ordner pro Aufnahmetag, darin getrennt nach Typ:
+Everything ends up in one folder per shooting day, split by type:
 
 ```
-Zielordner/
+Destination/
 └── 260112/
-    ├── JPG/    .JPG   aus DCIM
-    ├── RAW/    .ARW   aus DCIM
-    └── VID/    .MP4 und .XML aus PRIVATE/M4ROOT/CLIP
+    ├── JPG/    .JPG from DCIM
+    ├── RAW/    .ARW from DCIM
+    └── VID/    .MP4 and .XML from PRIVATE/M4ROOT/CLIP
 ```
 
-Der Ordnername ist das Aufnahmedatum als `JJMMTT`. Ein Shooting über zwei Tage landet also in zwei Ordnern.
+The folder name is the capture date as `YYMMDD`, taken from the file's modified time. A shoot that spans two days lands in two folders.
 
-- Karte oder USB-Stick einstecken, Benachrichtigung erscheint
-- Importieren per Klick, direkt in der Benachrichtigung oder im Fenster
-- Was schon im Ziel liegt (gleicher Name, gleiche Größe), wird übersprungen
-- Gleicher Name, aber andere Datei, wird nicht überschrieben sondern bekommt ein `_1`
-- Änderungsdatum der Dateien bleibt erhalten
-- Auf der Karte wird nichts gelöscht
+- Detects SD cards and USB drives that contain a `DCIM` folder and shows a notification
+- Import from the notification or from the window
+- Files that already exist at the destination (same name, same size) are skipped
+- Same name but a different file gets a `_1` suffix instead of being overwritten
+- Original modified times are kept
+- Nothing is ever deleted from the card
 
 ## Download
 
-Die aktuelle Version gibt es unter [Releases](https://github.com/vxnsin/sworta/releases/latest).
+Grab the latest build from [Releases](https://github.com/vxnsin/sworta/releases/latest):
 
-- `SWORTA.exe` einzeln, oder
-- `SWORTA.zip` mit Exe und README
+- `SWORTA.exe` on its own, or
+- `SWORTA.zip` with the exe and this README
 
-Keine Installation nötig, einfach die Exe an einen festen Ort legen (zum Beispiel `Dokumente\SWORTA`) und starten. Beim ersten Mal warnt Windows SmartScreen vor einem unbekannten Herausgeber, weil die Exe nicht signiert ist. "Weitere Informationen" und dann "Trotzdem ausführen".
+No installer. Put the exe somewhere permanent (for example `Documents\SWORTA`) and run it. Windows SmartScreen will warn about an unknown publisher on first launch because the exe is not code-signed: click "More info", then "Run anyway".
 
-## Einstellungen
+## Settings
 
-![Einstellungen](docs/settings.png)
+![Settings](docs/settings.png)
 
-- **Zielordner**: Standard ist `Bilder\SWORTA`
-- **Mit Windows starten**: läuft dann unsichtbar im Tray mit
-- **Benachrichtigung bei Karte**: aus, wenn du lieber selbst das Fenster aufmachst
-- **Updates automatisch laden**: siehe unten
+- **Destination folder**: defaults to `Pictures\SWORTA`
+- **Start with Windows**: runs hidden in the tray on login
+- **Notify on card**: turn it off if you would rather open the window yourself
+- **Update automatically**: see below
 
-Die Einstellungen liegen in `%APPDATA%\SWORTA\settings.json`.
+Settings live in `%APPDATA%\SWORTA\settings.json`.
 
 ## Updates
 
-SWORTA schaut beim Start und danach alle paar Stunden bei GitHub nach einer neueren Version. Ist eine da, lädt es die neue Exe, tauscht sie aus und startet sich neu, nie mitten in einem Import. Wer das nicht will, schaltet "Updates automatisch laden" aus und bekommt dann nur einen Hinweis mit Button. Manuell geht es unter Einstellungen mit "Nach Updates suchen".
+On startup and every few hours after that, SWORTA checks this repository for a newer release. If there is one, it downloads the new exe, swaps it in and restarts itself, never in the middle of an import. If you turn off automatic updates you just get a notice with an install button. You can also check by hand under Settings.
 
-## Selber bauen
+## Build from source
 
-Rust (stable) und die MSVC-Build-Tools reichen.
+Stable Rust and the MSVC build tools are enough.
 
 ```
-cargo run              # Entwicklung
+cargo run              # development
 cargo build --release  # target/release/sworta.exe
 ```
 
-## Neue Version veröffentlichen
+## Publishing a release
 
-1. Version in `Cargo.toml` hochzählen
-2. Committen und pushen
-3. Tag setzen: `git tag v0.2.0 && git push origin v0.2.0`
+1. Bump `version` in `Cargo.toml`
+2. Commit and push
+3. Tag it: `git tag v0.2.0 && git push origin v0.2.0`
 
-Die GitHub Action baut daraus die Exe und legt das Release an. Der Tag muss zur Version in `Cargo.toml` passen, sonst bricht der Build ab. Alle installierten SWORTAs ziehen sich das Update danach selbst.
+The GitHub Action builds the exe and creates the release. The tag has to match the version in `Cargo.toml` or the build fails. Every installed SWORTA picks the update up on its own.
 
-## Lizenz
+## License
 
 MIT
