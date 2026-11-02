@@ -43,15 +43,15 @@ The day comes from the file's time, or from the file name for cameras that write
 ## How it works
 
 ```mermaid
-flowchart LR
-    A[Card or phone<br>plugged in] --> B{Which camera?}
-    B -->|picked for this card before| C[Camera]
-    B -->|make and model in the photos| C
-    B -->|folders only this camera makes| C
-    B -->|nothing fits| L[Camera library<br>on GitHub]
-    L -->|looks like a GoPro, add it?| C
-    C --> D[Sort by card folder,<br>then by file type]
-    D --> E[Date / Type<br>at the destination]
+flowchart TD
+    A["Card or phone plugged in"] --> B{"Which camera?"}
+    B -- "picked before" --> C["Camera"]
+    B -- "model in the photos" --> C
+    B -- "its folders" --> C
+    B -- "no match" --> L["Camera library"]
+    L -- "add it" --> C
+    C --> D["Sorted by folder and file type"]
+    D --> E["Date / Type at the destination"]
 ```
 
 The camera never needs to be connected, the card is enough. SWORTA reads make and model from the first photo or clip, and where there is none it goes by the folders the camera left behind. A camera picked by hand is remembered for that card until the card gets formatted. Two bodies of the same brand can each have their own setup, the more specific model name wins.
