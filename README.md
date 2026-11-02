@@ -73,7 +73,7 @@ Both variants update themselves the same way, see below.
 - **Notifications**: popup, Windows toast or off, and how long the popup stays
 - **System**: start with Windows (runs hidden in the tray), automatic updates
 
-Settings live in `%APPDATA%\SWORTA\settings.json`, your cameras in `%APPDATA%\SWORTA\cameras\`.
+Settings live in `%APPDATA%\SWORTA\settings.json`, your cameras in `%APPDATA%\SWORTA\cameras\`. The main window can be pulled larger at its edges and keeps its size. If a card or phone does not behave, `%APPDATA%\SWORTA\sworta.log` says what SWORTA saw.
 
 ## Updates
 
