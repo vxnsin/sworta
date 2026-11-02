@@ -76,6 +76,11 @@ impl Card {
             .join(" · ")
     }
 
+    /// A device still being opened or read; its camera is not known for sure yet.
+    pub fn busy(&self) -> bool {
+        self.device && self.hint.is_some() && !self.locked
+    }
+
     /// No camera matched, or files showed up that the camera has no rule for.
     pub fn needs_setup(&self) -> bool {
         self.how == How::Unknown || !self.unsorted.is_empty()
@@ -283,7 +288,7 @@ fn read_device(h: &Handle, ctx: &eframe::egui::Context, key: String, name: Strin
             let mut c = card_from(&key, fallback, How::Unknown, None, Vec::new(), BTreeMap::new(), None);
             c.title = name.clone();
             c.device = true;
-            c.hint = Some(format!("Opening {name} …"));
+            c.hint = Some(format!("Opening {name} … unlock it and tap Allow if it asks."));
             h.lock().unwrap().cards.push(c);
             ctx.request_repaint();
         }
@@ -374,6 +379,14 @@ fn read_device(h: &Handle, ctx: &eframe::egui::Context, key: String, name: Strin
                 return;
             }
             log(&format!("device {name:?}: listed {} files", listed.len()));
+            // A phone that hands out nothing has usually not allowed access yet; look again soon.
+            if listed.is_empty() {
+                let mut c = make(None, Some("Unlock the device and allow access to its photos.".into()));
+                c.locked = true;
+                put(&h, &ctx, c);
+                h.lock().unwrap().reading.remove(&key);
+                return;
+            }
             let card = make(Some(Arc::new(listed)), None);
             put(&h, &ctx, card.clone());
             if fresh || was_locked {

@@ -1210,10 +1210,13 @@ impl App {
                             if c.device {
                                 ui.label(RichText::new(&c.title).color(MUTED).size(11.0));
                             }
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(&c.camera.name).size(12.0));
-                                ui.label(RichText::new(how_text(c)).color(MUTED).size(11.0));
-                            });
+                            // Which camera a device is only shows once it opened.
+                            if !(c.busy() && c.how == How::Unknown) {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(&c.camera.name).size(12.0));
+                                    ui.label(RichText::new(how_text(c)).color(MUTED).size(11.0));
+                                });
+                            }
                             match &c.hint {
                                 Some(h) => ui.label(RichText::new(h).color(if c.locked { RED } else { MUTED }).size(12.0)),
                                 None => ui.label(RichText::new(c.summary()).size(12.0)),
@@ -1229,7 +1232,7 @@ impl App {
             let running = job.is_some_and(|p| p.state == State::Running);
             // While a device is still being opened or read there is nothing to set up yet.
             if let (Some(c), false) = (card, job.is_some())
-                && !(c.device && c.hint.is_some() && !c.locked)
+                && !c.busy()
             {
                 if let (How::Unknown, Some(s)) = (c.how, &c.suggest) {
                     ui.label(RichText::new(format!("Looks like {}. Add it from the library and SWORTA sorts this card the right way.", s.name)).color(RED).size(11.5));
@@ -1638,6 +1641,7 @@ impl App {
                 ui.vertical(|ui| {
                     if let Some(c) = &card {
                         let name = match (&c.how, &c.suggest) {
+                            (How::Unknown, _) if c.busy() => c.title.clone(),
                             (How::Unknown, Some(s)) => format!("Looks like {}", s.name),
                             (How::Unknown, None) => "Unknown camera".to_string(),
                             _ => c.camera.name.clone(),
