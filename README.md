@@ -1,100 +1,135 @@
-# SWORTA
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/wordmark-dark.svg">
+    <img src="docs/wordmark-light.svg" alt="SWORTA" width="504">
+  </picture>
+</p>
 
-A small Windows tray app that sorts your camera card for you. Plug in the card, pick a folder, click import, done.
+<p align="center">
+  Plug in a camera card or a phone. SWORTA knows the camera and sorts it.
+</p>
 
-Every camera lays out its card differently. A Sony hides video clips in `PRIVATE/M4ROOT/CLIP`, a DJI Osmo Action writes low-res proxies next to every clip. SWORTA works out which camera a card comes from and sorts it the way you set that camera up. It stays quiet in the tray and only speaks up when a camera card shows up.
+<p align="center">
+  <a href="https://github.com/vxnsin/sworta/releases/latest"><img src="https://img.shields.io/github/v/release/vxnsin/sworta?style=flat-square&color=D71921&label=release" alt="Latest release"></a>
+  <a href="https://github.com/vxnsin/sworta/releases"><img src="https://img.shields.io/github/downloads/vxnsin/sworta/total?style=flat-square&color=111111&label=downloads" alt="Downloads"></a>
+  <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-111111?style=flat-square" alt="Windows 10 and 11">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/vxnsin/sworta?style=flat-square&color=111111" alt="MIT license"></a>
+</p>
 
-![Home](docs/home.png)
+<p align="center">
+  <a href="https://github.com/vxnsin/sworta/releases/latest">Download</a> ·
+  <a href="cameras">Camera library</a> ·
+  <a href="cameras/README.md">Add your camera</a> ·
+  <a href="https://github.com/vxnsin/sworta/releases">Changelog</a>
+</p>
 
-## What it does
+<p align="center">
+  <img src="docs/home.png" alt="SWORTA with a card plugged in" width="420">
+</p>
 
-By default everything ends up in one folder per shooting day, split by type:
+Every camera lays out its card differently. A Sony hides its clips in `PRIVATE/M4ROOT/CLIP` and its proxies in `PRIVATE/M4ROOT/SUB`, a DJI Osmo Action writes a low-res copy next to every video, an iPhone has no drive letter at all. SWORTA sits in the tray, notices when a card or phone shows up, works out which camera it came from and copies everything into one folder per shooting day, split the way you set that camera up.
 
 ```
-Destination/
-└── 260112/
-    ├── JPG/    .JPG from DCIM
-    ├── RAW/    .ARW from DCIM
-    └── VID/    .MP4 and .XML from PRIVATE/M4ROOT/CLIP
+Pictures/Shoot/
+└── 261102/
+    ├── JPG/
+    ├── RAW/
+    └── VID/
+        └── PROXY/
 ```
 
-The folder name is the capture date (`YYMMDD` or `YYYY-MM-DD`), taken from the file's modified time or, for cameras that put it there, from the file name. A shoot that spans two days lands in two folders.
+The day comes from the file's time, or from the file name for cameras that write it there, so a shoot over midnight lands in two folders. Nothing on the card is ever changed or deleted. Files that are already at the destination are skipped, a different file with the same name gets a `_1` instead of replacing anything, and the original times are kept. An import can be stopped at any point; what is copied stays, the half-written file goes.
 
-- Detects SD cards and USB drives that contain a `DCIM` folder or the folders of a known camera
-- Asks for the destination folder on every import, because every shoot goes somewhere else (can be switched to a fixed folder)
-- Imports can be cancelled at any time; files already copied stay, the half-written one is removed
-- Several cards can import at the same time, and several files per card are copied in parallel
-- Optional speed limit so the import does not choke your drive or network
-- Files that already exist at the destination (same name, size and time) are skipped
-- Same name but a different file gets a `_1` suffix instead of being overwritten
-- Original modified times are kept
-- Nothing is ever deleted from the card
+## How it works
+
+```mermaid
+flowchart LR
+    A[Card or phone<br>plugged in] --> B{Which camera?}
+    B -->|picked for this card before| C[Camera]
+    B -->|make and model in the photos| C
+    B -->|folders only this camera makes| C
+    B -->|nothing fits| L[Camera library<br>on GitHub]
+    L -->|looks like a GoPro, add it?| C
+    C --> D[Sort by card folder,<br>then by file type]
+    D --> E[Date / Type<br>at the destination]
+```
+
+The camera never needs to be connected, the card is enough. SWORTA reads make and model from the first photo or clip, and where there is none it goes by the folders the camera left behind. A camera picked by hand is remembered for that card until the card gets formatted. Two bodies of the same brand can each have their own setup, the more specific model name wins.
 
 ## Cameras
 
-SWORTA does not need the camera, only the card. It reads make and model from the first photo or clip, and if there is none it goes by the folders the camera left behind.
+The cameras live in this repository under [`cameras/`](cameras), one small JSON file each, in folders for action, mirrorless, cinema, drone, 360 and phone. The CAMERAS page in the app lists that library with a search, and one click adds a camera. None of it is baked into the exe, so a camera merged here reaches every SWORTA without a new release, and without internet the last list is kept.
 
-Cameras come from a small library that lives in this repository under [`cameras/`](cameras), sorted into action, mirrorless, cinema, drone, 360 and phone. The CAMERAS page lists it with a search, and one click adds a camera. When an unknown card turns out to match a camera from the library, the card itself offers to add it. Nothing of that is baked into the exe: a new camera merged here shows up in every SWORTA right away, and without internet the last list is kept. Anything SWORTA cannot place at all is sorted by sensible defaults until you set it up.
+Setting a camera up happens on the card itself. Click **Set up** and SWORTA shows what it found, like `MP4 12 · LRF 12 · JPG 30`. Each file type gets a folder or stays empty to be skipped, a whole card folder can get its own target (that is how Sony proxies end up in `VID/PROXY`), and the layout can be `date/type`, `camera/date/type` or your own. If a camera later writes a type it has no folder for yet, the card says so instead of leaving those files behind.
 
-Setting up a camera happens on the card itself: plug it in, click **Set up**, and SWORTA lists what it found (`MP4 12 · LRF 12 · JPG 30`). You pick a folder for each file type or leave it empty to skip it, choose how the folders are laid out (`date/type`, `camera/date/type`, …) and optionally a fixed import folder for that camera. If a camera later writes a file type it has no folder for yet, the card says so instead of quietly leaving the files behind.
+**Export** writes a camera out as a file and **Import file** adds it on another machine, so a colleague can hand you their setup. To add one for everybody, put the file into the right folder of [`cameras/`](cameras) with a pull request. [`cameras/README.md`](cameras/README.md) explains the format, and the tests check that a new camera loads and is recognised as itself and not as another one.
 
-Two cameras of the same brand can each get their own setup, the more specific model name wins (`ILCE-7M4` over `ILCE-`). If SWORTA cannot tell a card apart at all, pick the camera from the list on the card. That choice is remembered for the card until it gets formatted.
+## Phones
 
-Each camera is a small JSON file. **Export** on the camera page writes it out, **Import file** on another machine adds it, so a colleague can hand you their setup. To add a camera for everybody, drop the exported file into the right folder of [`cameras/`](cameras) with a pull request; [`cameras/README.md`](cameras/README.md) explains the format.
-
-Phones plugged in by cable show up like a card. Windows gives an iPhone or an Android phone no drive letter, so SWORTA reads it the way Explorer does: unlock the phone, allow access if it asks, and the card fills in while the files are listed. A full phone can take a few minutes for that, and an iPhone that keeps photos in iCloud first has to fetch them. Files come off a phone one at a time, and unplugging it in the middle stops the read or the import cleanly.
+A phone plugged in by cable shows up like a card. Unlock it, allow access if it asks, and the card fills in while SWORTA lists the files. Windows gives phones no drive letter, so they are read the way Explorer reads them, one file at a time. A full phone takes a few minutes to list, and an iPhone that keeps its photos in iCloud first has to fetch them. Unplugging in the middle stops the listing or the import cleanly.
 
 ## Notifications
 
-When a card shows up, a small popup appears in the corner of your screen with the card contents and an import button. It stays for a few seconds (or until you close it) and turns into a progress view once the import runs.
+When a card shows up, a small popup appears in the corner with what is on it and an import button. It turns into a progress view while the import runs. Windows notifications or no notifications at all work too, and "Preview popup" in the settings shows what it looks like.
 
-![Popup](docs/popup.png)
-
-If you prefer, switch to normal Windows notifications or turn them off in the settings. "Preview popup" shows you what it looks like.
+<p align="center">
+  <img src="docs/popup.png" alt="The popup in the corner of the screen" width="390">
+</p>
 
 ## Download
 
-Grab the latest build from [Releases](https://github.com/vxnsin/sworta/releases/latest):
+Get the latest build from [Releases](https://github.com/vxnsin/sworta/releases/latest). `SWORTA-Setup.exe` installs for your user only, without admin rights, with a Start menu entry and an uninstaller. `SWORTA-Portable.zip` needs no installation, unzip it somewhere permanent and run `SWORTA.exe`. Both update themselves.
 
-- **`SWORTA-Setup.exe`**: the installer (recommended). Installs for your user only, no admin rights needed, adds a Start menu entry and an uninstaller.
-- **`SWORTA-Portable.zip`**: no installation, just unzip somewhere permanent (for example `Documents\SWORTA`) and run `SWORTA.exe`.
-- `SWORTA.exe` on its own is the bare program the in-app updater downloads. You normally do not need it.
+> [!NOTE]
+> The files are not code-signed, so Windows SmartScreen warns about an unknown publisher the first time. Click **More info**, then **Run anyway**.
 
-Windows SmartScreen will warn about an unknown publisher on first launch because the files are not code-signed: click "More info", then "Run anyway".
+<details>
+<summary><b>Settings</b></summary>
 
-Both variants update themselves the same way, see below.
+<br>
 
-## Settings
+<p align="center"><img src="docs/settings.png" alt="Settings" width="420"></p>
 
-![Settings](docs/settings.png)
+Destination: ask on every import or use a fixed folder, and the format of the day folder. Import: speed limit, files at once per card, auto import into the last folder, open the folder when done. Notifications: popup, Windows notification or off, and how long the popup stays. System: start with Windows, hidden in the tray, and automatic updates.
 
-- **Destination**: ask on every import, or use a fixed folder; folder name format
-- **Import**: speed limit, files at once (1 to 4 per card), auto import into the last folder, open the folder when done
-- **Notifications**: popup, Windows toast or off, and how long the popup stays
-- **System**: start with Windows (runs hidden in the tray), automatic updates
+Settings live in `%APPDATA%\SWORTA\settings.json`, your cameras in `%APPDATA%\SWORTA\cameras\`. The window can be pulled larger at its edges and keeps its size. If a card or phone does not behave, `%APPDATA%\SWORTA\sworta.log` says what SWORTA saw.
 
-Settings live in `%APPDATA%\SWORTA\settings.json`, your cameras in `%APPDATA%\SWORTA\cameras\`. The main window can be pulled larger at its edges and keeps its size. If a card or phone does not behave, `%APPDATA%\SWORTA\sworta.log` says what SWORTA saw.
+</details>
 
-## Updates
+<details>
+<summary><b>Updates</b></summary>
 
-On startup and every few hours after that, SWORTA checks this repository for a newer release. If there is one, it downloads the new exe, swaps it in and restarts itself, never in the middle of an import. If you turn off automatic updates you just get a notice with an install button. You can also check by hand under Settings.
+<br>
 
-## Build from source
+On startup and every few hours after that, SWORTA checks this repository for a newer release. If there is one, it downloads `SWORTA.exe`, swaps it in and restarts, never in the middle of an import. With automatic updates off you get a notice with an install button instead, and Settings can check by hand.
+
+</details>
+
+<details>
+<summary><b>Build from source</b></summary>
+
+<br>
 
 Stable Rust and the MSVC build tools are enough.
 
 ```
 cargo run              # development
 cargo build --release  # target/release/sworta.exe
+cargo test             # also checks every camera in cameras/
 ```
 
-## Publishing a release
+The logo and the wordmark are generated: `node docs/brand.mjs docs`.
 
-1. Bump `version` in `Cargo.toml`
-2. Commit and push
-3. Tag it: `git tag v0.2.2 && git push origin v0.2.2`
+</details>
 
-The GitHub Action builds the exe and creates the release. The tag has to match the version in `Cargo.toml` or the build fails. Every installed SWORTA picks the update up on its own.
+<details>
+<summary><b>Publishing a release</b></summary>
+
+<br>
+
+Bump `version` in `Cargo.toml`, commit and push, then tag it: `git tag v0.4.0 && git push origin v0.4.0`. The GitHub Action builds the exe, the installer and the zip and creates the release. The tag has to match the version in `Cargo.toml` or the build fails. Every installed SWORTA picks the update up on its own.
+
+</details>
 
 ## License
 
