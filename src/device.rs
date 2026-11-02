@@ -7,6 +7,10 @@
 use std::{
     cell::Cell,
     io,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use windows::{
@@ -137,13 +141,15 @@ pub struct Opened {
     storages: Vec<IShellItem>,
     /// Set once the device stopped answering; everything after that is skipped.
     gone: Cell<bool>,
+    /// Set from outside when the device left the list of devices.
+    stop: Arc<AtomicBool>,
 }
 
 impl Opened {
-    pub fn new(key: &str) -> Option<Self> {
+    pub fn new(key: &str, stop: Arc<AtomicBool>) -> Option<Self> {
         let dev = unsafe { SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(key), None).ok()? };
         let storages = children(&dev)?.into_iter().filter(is_dir).collect();
-        Some(Self { storages, gone: Cell::new(false) })
+        Some(Self { storages, gone: Cell::new(false), stop })
     }
 
     /// No storage means the phone is locked or has not allowed access yet.
@@ -151,17 +157,23 @@ impl Opened {
         self.storages.is_empty()
     }
 
-    /// The device stopped answering, most likely it was unplugged.
+    /// The device stopped answering or was unplugged.
     pub fn is_gone(&self) -> bool {
-        self.gone.get()
+        self.gone.get() || self.stop.load(Ordering::SeqCst)
+    }
+
+    /// Every question to a device that is gone makes Windows show a "not responding" dialog,
+    /// so the first one that comes back empty ends the whole walk.
+    fn lost(&self) {
+        self.gone.set(true);
     }
 
     fn list(&self, dir: &IShellItem) -> Vec<IShellItem> {
-        if self.gone.get() {
+        if self.is_gone() {
             return Vec::new();
         }
         children(dir).unwrap_or_else(|| {
-            self.gone.set(true);
+            self.lost();
             Vec::new()
         })
     }
@@ -190,20 +202,20 @@ impl Opened {
     pub fn walk(&self, sources: &[String], f: &mut dyn FnMut(File, &str, &str)) {
         fn go(o: &Opened, dir: &IShellItem, src: &str, f: &mut dyn FnMut(File, &str, &str)) {
             for c in o.list(dir) {
-                if o.gone.get() {
+                if o.is_gone() {
                     return;
                 }
                 if is_dir(&c) {
                     go(o, &c, src, f);
                     continue;
                 }
-                let Some(name) = name_of(&c, SIGDN_NORMALDISPLAY) else { continue };
+                let Some(name) = name_of(&c, SIGDN_NORMALDISPLAY) else { return o.lost() };
                 let ext = name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
                 if ext.is_empty() || name.starts_with('.') {
                     continue;
                 }
-                let Some(pidl) = pidl_of(&c) else { continue };
-                let (size, mtime) = details(&c);
+                let Some(pidl) = pidl_of(&c) else { return o.lost() };
+                let Some((size, mtime)) = details(&c) else { return o.lost() };
                 f(File { name, size, mtime, pidl }, &ext, src);
             }
         }
@@ -222,12 +234,13 @@ fn to_system_time(ft: FILETIME) -> SystemTime {
     UNIX_EPOCH + Duration::from_nanos(unix.saturating_mul(100))
 }
 
-fn details(it: &IShellItem) -> (u64, SystemTime) {
-    let Ok(it2) = it.cast::<IShellItem2>() else { return (0, SystemTime::now()) };
+/// Size and time of a file; None when the device does not answer.
+fn details(it: &IShellItem) -> Option<(u64, SystemTime)> {
+    let it2 = it.cast::<IShellItem2>().ok()?;
     unsafe {
-        let size = it2.GetUInt64(&PKEY_Size).unwrap_or(0);
+        let size = it2.GetUInt64(&PKEY_Size).ok()?;
         let mtime = it2.GetFileTime(&PKEY_DateModified).map(to_system_time).unwrap_or_else(|_| SystemTime::now());
-        (size, mtime)
+        Some((size, mtime))
     }
 }
 
@@ -265,7 +278,7 @@ mod tests {
         init();
         for d in list() {
             eprintln!("{:?} device {:?}", t.elapsed(), d.name);
-            let Some(o) = Opened::new(&d.key) else { continue };
+            let Some(o) = Opened::new(&d.key, Default::default()) else { continue };
             eprintln!("{:?}   storages: {}", t.elapsed(), o.storages.len());
             let mut files = Vec::new();
             o.walk(&[folder.clone()], &mut |f, _, _| files.push(f));

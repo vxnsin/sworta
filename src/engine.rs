@@ -133,8 +133,8 @@ pub struct Shared {
     pub library: crate::library::Library,
     /// Camera picked by hand per drive root, for cards without a volume serial.
     pub picked: HashMap<String, String>,
-    /// Devices being read right now.
-    pub reading: HashSet<String>,
+    /// Devices being read right now, with the flag that stops the read when one is unplugged.
+    pub reading: HashMap<String, Arc<AtomicBool>>,
     pub update: crate::update::Update,
     /// Set by background threads, picked up by the UI thread.
     pub popup_request: Option<String>,
@@ -259,8 +259,13 @@ fn put(h: &Handle, ctx: &eframe::egui::Context, card: Card) {
 /// Reads a phone or camera plugged in by cable in the background. The card shows up right
 /// away and fills in once the files are listed, which can take minutes on a full phone.
 fn read_device(h: &Handle, ctx: &eframe::egui::Context, key: String, name: String, fresh: bool) {
-    if !h.lock().unwrap().reading.insert(key.clone()) {
-        return;
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let mut g = h.lock().unwrap();
+        if g.reading.contains_key(&key) {
+            return;
+        }
+        g.reading.insert(key.clone(), stop.clone());
     }
     let (h, ctx) = (h.clone(), ctx.clone());
     thread::spawn(move || {
@@ -282,7 +287,7 @@ fn read_device(h: &Handle, ctx: &eframe::egui::Context, key: String, name: Strin
             h.lock().unwrap().cards.push(c);
             ctx.request_repaint();
         }
-        let opened = device::Opened::new(&key);
+        let opened = device::Opened::new(&key, stop);
         log(&format!("device {name:?}: opened {}", if opened.as_ref().is_some_and(|o| !o.is_empty()) { "with storage" } else { "without storage" }));
         let has = |p: &str| opened.as_ref().is_some_and(|o| o.has_path(p));
         let found = camera::detect_device(&name, &has, &cams, pick.as_deref());
@@ -527,6 +532,10 @@ fn gone(h: &Handle, ctx: &eframe::egui::Context, root: &str) {
     let mut g = h.lock().unwrap();
     g.cards.retain(|c| c.root != root);
     g.picked.remove(root);
+    // A device still being read stops asking it right away.
+    if let Some(stop) = g.reading.get(root) {
+        stop.store(true, Ordering::SeqCst);
+    }
     ctx.request_repaint();
 }
 
@@ -561,6 +570,10 @@ pub fn spawn_watcher(h: Handle, ctx: eframe::egui::Context) {
 
             let devices = device::list();
             for d in &devices {
+                // Plugged in again before the old read wound down: wait for it, then read fresh.
+                if h.lock().unwrap().reading.contains_key(&d.key) && !known_dev.contains(&d.key) {
+                    continue;
+                }
                 if known_dev.insert(d.key.clone()) {
                     log(&format!("device {:?} plugged in", d.name));
                     read_device(&h, &ctx, d.key.clone(), d.name.clone(), true);
