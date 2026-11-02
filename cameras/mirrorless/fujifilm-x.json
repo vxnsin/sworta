@@ -1,0 +1,17 @@
+{
+  "id": "fujifilm-x",
+  "name": "Fujifilm X / GFX",
+  "models": ["FUJIFILM"],
+  "markers": ["DCIM/*_FUJI"],
+  "sources": ["DCIM"],
+  "types": {
+    "jpg": "JPG",
+    "hif": "HIF",
+    "raf": "RAW",
+    "mov": "VID",
+    "mp4": "VID",
+    "wav": "AUDIO"
+  },
+  "layout": "{date}/{type}",
+  "date_from_name": false
+}

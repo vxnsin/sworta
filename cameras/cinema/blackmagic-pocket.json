@@ -1,0 +1,14 @@
+{
+  "id": "blackmagic-pocket",
+  "name": "Blackmagic Pocket Cinema",
+  "models": [],
+  "markers": ["*.braw"],
+  "sources": ["."],
+  "types": {
+    "braw": "VID",
+    "sidecar": "VID",
+    "mov": "VID"
+  },
+  "layout": "{date}/{type}",
+  "date_from_name": false
+}

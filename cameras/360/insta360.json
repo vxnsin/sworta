@@ -1,0 +1,17 @@
+{
+  "id": "insta360",
+  "name": "Insta360",
+  "models": ["Insta360"],
+  "markers": ["DCIM/Camera01"],
+  "sources": ["DCIM"],
+  "types": {
+    "insv": "VID",
+    "mp4": "VID",
+    "insp": "JPG",
+    "jpg": "JPG",
+    "dng": "RAW",
+    "lrv": ""
+  },
+  "layout": "{date}/{type}",
+  "date_from_name": true
+}

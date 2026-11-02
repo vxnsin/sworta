@@ -11,7 +11,7 @@ use std::{
 
 use crate::engine::{self, Handle};
 
-const REPO: &str = "vxnsin/sworta";
+pub const REPO: &str = "vxnsin/sworta";
 const ASSET: &str = "SWORTA.exe";
 const CHECK_EVERY: Duration = Duration::from_secs(6 * 3600);
 

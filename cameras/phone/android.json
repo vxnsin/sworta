@@ -1,0 +1,19 @@
+{
+  "id": "android",
+  "name": "Android phone",
+  "models": [],
+  "markers": ["DCIM/Camera"],
+  "sources": ["DCIM"],
+  "types": {
+    "jpg": "PHOTO",
+    "jpeg": "PHOTO",
+    "heic": "PHOTO",
+    "webp": "PHOTO",
+    "dng": "RAW",
+    "png": "PHOTO",
+    "mp4": "VID",
+    "mov": "VID"
+  },
+  "layout": "{date}/{type}",
+  "date_from_name": true
+}

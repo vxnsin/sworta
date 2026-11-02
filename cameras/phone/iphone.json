@@ -1,0 +1,19 @@
+{
+  "id": "iphone",
+  "name": "iPhone",
+  "models": ["Apple iPhone"],
+  "markers": ["DCIM/*APPLE"],
+  "sources": ["DCIM"],
+  "types": {
+    "heic": "PHOTO",
+    "jpg": "PHOTO",
+    "webp": "PHOTO",
+    "dng": "RAW",
+    "png": "SCREENSHOT",
+    "mov": "VID",
+    "mp4": "VID",
+    "aae": ""
+  },
+  "layout": "{date}/{type}",
+  "date_from_name": false
+}

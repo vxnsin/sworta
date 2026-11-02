@@ -1,0 +1,17 @@
+{
+  "id": "dji-drone",
+  "name": "DJI drone",
+  "models": ["DJI FC", "DJI Mini", "DJI Mavic", "DJI Air", "DJI Avata"],
+  "markers": ["DCIM/100MEDIA"],
+  "sources": ["DCIM"],
+  "types": {
+    "jpg": "JPG",
+    "dng": "RAW",
+    "mp4": "VID",
+    "mov": "VID",
+    "srt": "VID",
+    "lrf": ""
+  },
+  "layout": "{date}/{type}",
+  "date_from_name": true
+}

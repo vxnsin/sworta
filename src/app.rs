@@ -19,6 +19,7 @@ use crate::{
     config::{self, Notify, Settings},
     dots,
     engine::{self, Card, Handle, Progress, Shared, State},
+    library::{self, Library},
     update::{self, Update},
 };
 
@@ -199,6 +200,8 @@ pub struct App {
     editor: Option<Editor>,
     /// Result of the last camera import, shown on the CAMERAS tab.
     cam_msg: Option<String>,
+    lib_query: String,
+    lib_cat: usize,
     _tray: TrayIcon,
 }
 
@@ -207,6 +210,7 @@ struct Snap {
     jobs: HashMap<String, Progress>,
     settings: Settings,
     cameras: Vec<Camera>,
+    library: Library,
     update: Update,
 }
 
@@ -256,6 +260,7 @@ impl App {
             jobs: HashMap::new(),
             settings,
             cameras: camera::load_all(),
+            library: library::load_cache(),
             picked: HashMap::new(),
             update: Default::default(),
             popup_request: None,
@@ -263,6 +268,7 @@ impl App {
         }));
         engine::spawn_watcher(h.clone(), ctx.clone());
         update::spawn_checker(h.clone(), ctx.clone());
+        library::refresh(&h, &ctx);
 
         let open = MenuItem::with_id("open", "Open", true, None);
         let quit = MenuItem::with_id("quit", "Quit", true, None);
@@ -303,6 +309,8 @@ impl App {
             synced: false,
             editor: None,
             cam_msg: None,
+            lib_query: String::new(),
+            lib_cat: 0,
             _tray: tray,
         }
     }
@@ -365,7 +373,16 @@ impl App {
             jobs: g.jobs.clone(),
             settings: g.settings.clone(),
             cameras: g.cameras.clone(),
+            library: g.library.clone(),
             update: g.update.clone(),
+        }
+    }
+
+    /// Adds the library camera an unknown card looks like and remembers it for that card.
+    fn add_suggested(&mut self, ctx: &egui::Context, root: &str, cam: &Camera) {
+        match library::install(&self.h, cam) {
+            Ok(()) => engine::assign(&self.h, ctx, root, &cam.id),
+            Err(e) => self.cam_msg = Some(e),
         }
     }
 
@@ -658,7 +675,23 @@ fn demo_card() -> Card {
         counts: BTreeMap::from([("JPG".into(), 128), ("RAW".into(), 128), ("VID".into(), 6)]),
         unsorted: BTreeMap::new(),
         bytes: 14_200_000_000,
+        suggest: None,
     }
+}
+
+/// What a camera is recognised by, for the camera lists.
+fn recognised(cam: &Camera) -> String {
+    if cam.id == camera::FALLBACK {
+        return "used when no other camera matches".into();
+    }
+    let mut parts = Vec::new();
+    if !cam.models.is_empty() {
+        parts.push(format!("model {}", cam.models.join(", ")));
+    }
+    if !cam.markers.is_empty() {
+        parts.push(format!("folders {}", cam.markers.join(", ")));
+    }
+    if parts.is_empty() { "only cards picked by hand".into() } else { parts.join(" · ") }
 }
 
 fn how_text(c: &Card) -> String {
@@ -1094,7 +1127,9 @@ impl App {
             });
             let running = job.is_some_and(|p| p.state == State::Running);
             if let (Some(c), false) = (card, job.is_some()) {
-                if c.how == How::Unknown {
+                if let (How::Unknown, Some(s)) = (c.how, &c.suggest) {
+                    ui.label(RichText::new(format!("Looks like {}. Add it from the library and SWORTA sorts this card the right way.", s.name)).color(RED).size(11.5));
+                } else if c.how == How::Unknown {
                     ui.label(RichText::new("Not set up yet, sorted by the default rules. Set it up once and SWORTA knows it next time.").color(RED).size(11.5));
                 } else if !c.unsorted.is_empty() {
                     ui.label(RichText::new(format!("Not imported, no folder set: {}", c.unsorted_line())).color(RED).size(11.5));
@@ -1102,6 +1137,11 @@ impl App {
                 ui.horizontal(|ui| {
                     if btn(ui, "IMPORT", Btn::Primary, !c.items.is_empty()) {
                         engine::begin_import(&self.h, ctx, &root);
+                    }
+                    if let (How::Unknown, Some(s)) = (c.how, &c.suggest) {
+                        if btn(ui, "ADD CAMERA", Btn::Ghost, true) {
+                            self.add_suggested(ctx, &root, s);
+                        }
                     }
                     let label = if c.needs_setup() { "SET UP" } else { "EDIT CAMERA" };
                     if btn(ui, label, Btn::Ghost, true) {
@@ -1186,26 +1226,14 @@ impl App {
             return;
         }
 
-        rule(ui, "01", "CAMERAS");
+        rule(ui, "01", "MY CAMERAS");
         let mut edit = None;
         for cam in &snap.cameras {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.label(RichText::new(&cam.name).size(12.0));
-                    let how = if cam.id == camera::FALLBACK {
-                        "used when no other camera matches".to_string()
-                    } else {
-                        let mut parts = Vec::new();
-                        if !cam.models.is_empty() {
-                            parts.push(format!("model {}", cam.models.join(", ")));
-                        }
-                        if !cam.markers.is_empty() {
-                            parts.push(format!("folders {}", cam.markers.join(", ")));
-                        }
-                        if parts.is_empty() { "only cards picked by hand".into() } else { parts.join(" · ") }
-                    };
-                    note(ui, how);
+                    note(ui, recognised(cam));
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if btn(ui, "EDIT", Btn::Ghost, true) {
@@ -1233,12 +1261,89 @@ impl App {
         }
         ui.add_space(10.0);
 
-        rule(ui, "02", "HOW CARDS ARE MATCHED");
+        self.library_ui(ui, ctx, snap);
+        ui.add_space(10.0);
+
+        rule(ui, "03", "HOW CARDS ARE MATCHED");
         note(
             ui,
             "SWORTA reads the camera model from the photos and clips on the card, then looks at its folders. \
              A camera you pick for a card by hand is remembered until the card is formatted. \
              The camera never needs to be connected, the card is enough.",
+        );
+    }
+
+    fn library_ui(&mut self, ui: &mut Ui, ctx: &egui::Context, snap: &Snap) {
+        let lib = &snap.library;
+        rule(ui, "02", "LIBRARY");
+        ui.add(
+            egui::TextEdit::singleline(&mut self.lib_query)
+                .hint_text("search, e.g. gopro, a7, iphone")
+                .desired_width(f32::INFINITY)
+                .font(FontId::monospace(12.0)),
+        );
+        let cats: Vec<String> = std::iter::once("ALL".to_string())
+            .chain(
+                library::CATEGORIES
+                    .iter()
+                    .filter(|c| lib.entries.iter().any(|e| e.category == **c))
+                    .map(|c| c.to_uppercase()),
+            )
+            .collect();
+        let labels: Vec<&str> = cats.iter().map(String::as_str).collect();
+        if self.lib_cat >= labels.len() {
+            self.lib_cat = 0;
+        }
+        choice(ui, &mut self.lib_cat, &labels);
+        let cat = (self.lib_cat > 0).then(|| labels[self.lib_cat].to_lowercase());
+
+        let mut add = None;
+        let mut shown = 0;
+        for e in lib
+            .entries
+            .iter()
+            .filter(|e| cat.as_ref().is_none_or(|c| &e.category == c) && library::matches(e, &self.lib_query))
+        {
+            shown += 1;
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(&e.camera.name).size(12.0));
+                    note(ui, format!("{} · {}", e.category.to_uppercase(), recognised(&e.camera)));
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let have = snap.cameras.iter().any(|c| c.id == e.camera.id);
+                    if btn(ui, if have { "ADDED" } else { "ADD" }, Btn::Ghost, !have) {
+                        add = Some(e.camera.clone());
+                    }
+                });
+            });
+        }
+        if shown == 0 && !lib.entries.is_empty() {
+            note(ui, "No camera matches.");
+        }
+        if let Some(c) = add {
+            match library::install(&self.h, &c) {
+                Ok(()) => engine::rescan_all(&self.h, ctx),
+                Err(e) => self.cam_msg = Some(e),
+            }
+        }
+
+        ui.add_space(4.0);
+        let status = match &lib.status {
+            library::Status::Loading => "loading from GitHub …".to_string(),
+            library::Status::Offline(e) if lib.entries.is_empty() => format!("Could not reach GitHub ({e})."),
+            library::Status::Offline(_) => "offline, showing the saved list".to_string(),
+            _ => format!("{} cameras from github.com/{}", lib.entries.len(), update::REPO),
+        };
+        note(ui, status);
+        if btn(ui, "REFRESH", Btn::Ghost, lib.status != library::Status::Loading) {
+            library::refresh(&self.h, ctx);
+        }
+        note(
+            ui,
+            "Missing your camera? Set it up with NEW CAMERA, export it and add the file to \
+             cameras/<category>/ with a pull request.",
         );
     }
 
@@ -1428,7 +1533,11 @@ impl App {
                 ui.add_space(4.0);
                 ui.vertical(|ui| {
                     if let Some(c) = &card {
-                        let name = if c.how == How::Unknown { "Unknown camera" } else { &c.camera.name };
+                        let name = match (&c.how, &c.suggest) {
+                            (How::Unknown, Some(s)) => format!("Looks like {}", s.name),
+                            (How::Unknown, None) => "Unknown camera".to_string(),
+                            _ => c.camera.name.clone(),
+                        };
                         ui.label(RichText::new(name).size(12.0));
                         ui.label(RichText::new(format!("{}  ·  {}", c.summary(), fmt_bytes(c.bytes))).color(MUTED).size(11.5));
                     }
@@ -1454,8 +1563,13 @@ impl App {
                     if btn(ui, "IMPORT", Btn::Primary, can) {
                         engine::begin_import(&self.h, ctx, &key);
                     }
+                    let suggest = card.as_ref().filter(|c| c.how == How::Unknown).and_then(|c| c.suggest.clone());
                     let setup = !demo && card.as_ref().is_some_and(|c| c.needs_setup());
-                    if btn(ui, if setup { "SET UP" } else { "OPEN" }, Btn::Ghost, true) {
+                    if let Some(s) = suggest {
+                        if btn(ui, "ADD CAMERA", Btn::Ghost, true) {
+                            self.add_suggested(ctx, &key, &s);
+                        }
+                    } else if btn(ui, if setup { "SET UP" } else { "OPEN" }, Btn::Ghost, true) {
                         if let (true, Some(c)) = (setup, &card) {
                             self.open_setup(c);
                         }

@@ -5,6 +5,7 @@ mod camera;
 mod config;
 mod dots;
 mod engine;
+mod library;
 mod update;
 
 use eframe::egui;

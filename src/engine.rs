@@ -41,6 +41,8 @@ pub struct Card {
     /// Extensions the camera has no rule for, with their file count; these are not imported.
     pub unsorted: BTreeMap<String, usize>,
     pub bytes: u64,
+    /// Library camera that fits an unknown card.
+    pub suggest: Option<Camera>,
 }
 
 impl Card {
@@ -113,6 +115,7 @@ pub struct Shared {
     pub jobs: HashMap<String, Progress>,
     pub settings: Settings,
     pub cameras: Vec<Camera>,
+    pub library: crate::library::Library,
     /// Camera picked by hand per drive root, for cards without a volume serial.
     pub picked: HashMap<String, String>,
     pub update: crate::update::Update,
@@ -127,11 +130,17 @@ pub fn any_running(g: &Shared) -> bool {
     g.jobs.values().any(|p| p.state == State::Running)
 }
 
-fn scan(root: &str, cameras: &[Camera], pick: Option<&str>) -> Card {
+fn scan(root: &str, cameras: &[Camera], library: &[Camera], pick: Option<&str>) -> Card {
     let base = Path::new(root);
     let serial = camera::volume_serial(root);
     let found = camera::detect(base, cameras, pick);
     let cam = found.camera.clone();
+    let suggest = if found.how == How::Unknown && !library.is_empty() {
+        let f = camera::detect(base, library, None);
+        (f.how != How::Unknown).then(|| f.camera.clone())
+    } else {
+        None
+    };
 
     let mut items = Vec::new();
     let mut unsorted = BTreeMap::new();
@@ -165,7 +174,13 @@ fn scan(root: &str, cameras: &[Camera], pick: Option<&str>) -> Card {
         unsorted,
         bytes: items.iter().map(|i| i.size).sum(),
         items: Arc::new(items),
+        suggest,
     }
+}
+
+/// The user's cameras and the library cameras they do not have yet.
+fn camera_lists(g: &Shared) -> (Vec<Camera>, Vec<Camera>) {
+    (g.cameras.clone(), g.library.missing(&g.cameras))
 }
 
 /// Camera the user chose for this card earlier, by volume serial or for this session.
@@ -196,15 +211,16 @@ pub fn rescan_all(h: &Handle, ctx: &eframe::egui::Context) {
     thread::spawn(move || {
         let roots: Vec<String> = h.lock().unwrap().cards.iter().map(|c| c.root.clone()).collect();
         for root in roots {
-            let (cams, pick) = {
+            let (cams, lib, pick) = {
                 let g = h.lock().unwrap();
                 if g.jobs.get(&root).is_some_and(|p| p.state == State::Running) {
                     continue;
                 }
                 let serial = camera::volume_serial(&root);
-                (g.cameras.clone(), picked_for(&g, &root, serial.as_ref()))
+                let (cams, lib) = camera_lists(&g);
+                (cams, lib, picked_for(&g, &root, serial.as_ref()))
             };
-            let card = scan(&root, &cams, pick.as_deref());
+            let card = scan(&root, &cams, &lib, pick.as_deref());
             if let Some(slot) = h.lock().unwrap().cards.iter_mut().find(|c| c.root == root) {
                 *slot = card;
             }
@@ -241,19 +257,20 @@ pub fn spawn_watcher(h: Handle, ctx: eframe::egui::Context) {
             .map_or('C', |c| c.to_ascii_uppercase());
         let mut known: HashSet<char> = HashSet::new();
         loop {
-            let cams = h.lock().unwrap().cameras.clone();
+            let (cams, lib) = camera_lists(&h.lock().unwrap());
+            let every: Vec<Camera> = cams.iter().chain(&lib).cloned().collect();
             for l in 'D'..='Z' {
                 if l == sys {
                     continue;
                 }
                 let root = format!("{l}:\\");
-                let present = Path::new(&root).is_dir() && camera::looks_like_card(Path::new(&root), &cams);
+                let present = Path::new(&root).is_dir() && camera::looks_like_card(Path::new(&root), &every);
                 if present && known.insert(l) {
                     let pick = {
                         let g = h.lock().unwrap();
                         picked_for(&g, &root, camera::volume_serial(&root).as_ref())
                     };
-                    let card = scan(&root, &cams, pick.as_deref());
+                    let card = scan(&root, &cams, &lib, pick.as_deref());
                     let (mode, auto) = {
                         let mut g = h.lock().unwrap();
                         g.cards.push(card.clone());

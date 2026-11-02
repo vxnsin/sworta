@@ -1,7 +1,7 @@
 {
   "id": "dji-action",
   "name": "DJI Osmo Action",
-  "models": ["OsmoAction", "Osmo Action"],
+  "models": ["DJI OsmoAction", "DJI Osmo Action"],
   "markers": ["DCIM/DJI_*"],
   "sources": ["DCIM"],
   "types": {

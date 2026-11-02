@@ -1,0 +1,16 @@
+{
+  "id": "gopro-hero",
+  "name": "GoPro HERO",
+  "models": ["GoPro"],
+  "markers": ["DCIM/*GOPRO"],
+  "sources": ["DCIM"],
+  "types": {
+    "mp4": "VID",
+    "jpg": "JPG",
+    "gpr": "RAW",
+    "lrv": "",
+    "thm": ""
+  },
+  "layout": "{date}/{type}",
+  "date_from_name": false
+}

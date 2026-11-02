@@ -1,0 +1,18 @@
+{
+  "id": "canon-eos",
+  "name": "Canon EOS",
+  "models": ["Canon"],
+  "markers": ["DCIM/CANONMSC", "DCIM/*CANON"],
+  "sources": ["DCIM"],
+  "types": {
+    "jpg": "JPG",
+    "hif": "HIF",
+    "cr2": "RAW",
+    "cr3": "RAW",
+    "mp4": "VID",
+    "mov": "VID",
+    "wav": "AUDIO"
+  },
+  "layout": "{date}/{type}",
+  "date_from_name": false
+}

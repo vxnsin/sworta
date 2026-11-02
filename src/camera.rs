@@ -13,11 +13,8 @@ use std::{
 /// Used when no camera matches a card.
 pub const FALLBACK: &str = "other";
 
-const BUILTIN: [&str; 3] = [
-    include_str!("../cameras/sony-alpha.json"),
-    include_str!("../cameras/dji-action.json"),
-    include_str!("../cameras/other.json"),
-];
+/// The only camera inside the exe; real cameras come from the library in `cameras/`.
+const BUILTIN: [&str; 1] = [include_str!("fallback.json")];
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 #[serde(default)]
@@ -261,20 +258,36 @@ fn xml_attr(xml: &str, name: &str) -> Option<String> {
     (!v.is_empty()).then(|| v.to_string())
 }
 
+/// "FUJIFILM" + "X-T5" → "FUJIFILM X-T5"; "NIKON CORPORATION" + "NIKON Z 6" stays "NIKON Z 6".
+fn with_make(make: Option<String>, model: String) -> String {
+    match make {
+        Some(m) if !m.is_empty() => {
+            let first = m.split_whitespace().next().unwrap_or(&m).to_lowercase();
+            if model.to_lowercase().starts_with(&first) { model } else { format!("{m} {model}") }
+        }
+        _ => model,
+    }
+}
+
 fn exif_model(p: &Path) -> Option<String> {
     let mut r = BufReader::new(fs::File::open(p).ok()?);
     let ex = exif::Reader::new().read_from_container(&mut r).ok()?;
-    let field = ex.get_field(exif::Tag::Model, exif::In::PRIMARY)?;
-    let exif::Value::Ascii(v) = &field.value else { return None };
-    let s = String::from_utf8_lossy(v.first()?).trim_matches(char::from(0)).trim().to_string();
-    (!s.is_empty()).then_some(s)
+    let text = |tag| {
+        let field = ex.get_field(tag, exif::In::PRIMARY)?;
+        let exif::Value::Ascii(v) = &field.value else { return None };
+        let s = String::from_utf8_lossy(v.first()?).trim_matches(char::from(0)).trim().to_string();
+        (!s.is_empty()).then_some(s)
+    };
+    Some(with_make(text(exif::Tag::Make), text(exif::Tag::Model)?))
 }
 
-/// Camera model from the Sony clip XML or the EXIF of the first photo.
+/// Make and model from the Sony clip XML or the EXIF of the first photo.
 pub fn read_model(root: &Path) -> Option<String> {
     if let Some(x) = first_file(&root.join("PRIVATE").join("M4ROOT").join("CLIP"), &["xml"], 0) {
-        if let Some(m) = fs::read_to_string(x).ok().and_then(|s| xml_attr(&s, "modelName")) {
-            return Some(m);
+        if let Ok(s) = fs::read_to_string(x) {
+            if let Some(m) = xml_attr(&s, "modelName") {
+                return Some(with_make(xml_attr(&s, "manufacturer"), m));
+            }
         }
     }
     // Photos first: a JPG header is quick, a RAW is read whole.
@@ -497,33 +510,70 @@ mod tests {
         }
     }
 
+    /// The library as it is in the repo. Tests read it from disk, the exe never contains it.
+    fn library() -> Vec<(String, String, Camera)> {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("cameras");
+        let mut out = Vec::new();
+        for cat in fs::read_dir(&base).unwrap().flatten().filter(|e| e.path().is_dir()) {
+            for f in fs::read_dir(cat.path()).unwrap().flatten() {
+                let p = f.path();
+                if ext(&p) != "json" {
+                    continue;
+                }
+                let cam = read(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+                let stem = p.file_stem().unwrap().to_string_lossy().into_owned();
+                out.push((cat.file_name().to_string_lossy().into_owned(), stem, cam));
+            }
+        }
+        out
+    }
+
+    fn cams() -> Vec<Camera> {
+        let mut v: Vec<Camera> = library().into_iter().map(|(_, _, c)| c).collect();
+        v.extend(builtins());
+        v
+    }
+
+    fn lib(id: &str) -> Camera {
+        cams().into_iter().find(|c| c.id == id).unwrap()
+    }
+
     #[test]
-    fn builtins_parse_and_fallback_is_last() {
+    fn only_the_fallback_is_built_in() {
         let all = builtins();
-        assert_eq!(all.len(), 3);
-        assert_eq!(all.last().unwrap().id, FALLBACK);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, FALLBACK);
     }
 
     #[test]
-    fn sony_by_folders() {
-        let card = TempCard::new(&["DCIM/100MSDCF/DSC00001.ARW", "PRIVATE/M4ROOT/CLIP/C0001.MP4"]);
-        let cams = builtins();
-        let f = detect(&card.0, &cams, None);
-        assert_eq!(f.camera.id, "sony-alpha");
-        assert_eq!(f.how, How::Folders);
+    fn library_files_are_valid() {
+        let lib = library();
+        assert!(lib.len() >= 10);
+        let mut ids = std::collections::HashSet::new();
+        for (cat, stem, c) in &lib {
+            assert!(crate::library::CATEGORIES.contains(&cat.as_str()), "unknown category {cat}");
+            assert_eq!(stem, &c.id, "file name and id differ for {}", c.name);
+            assert_ne!(c.id, FALLBACK);
+            assert!(ids.insert(c.id.clone()), "id {} used twice", c.id);
+            assert!(!c.markers.is_empty() || !c.models.is_empty(), "{} can never be recognised", c.id);
+        }
     }
 
     #[test]
-    fn dji_by_folders() {
-        let card = TempCard::new(&["DCIM/DJI_001/DJI_20261102143000_0001_D.MP4"]);
-        let cams = builtins();
-        assert_eq!(detect(&card.0, &cams, None).camera.id, "dji-action");
+    fn every_library_camera_is_recognised_by_its_folders() {
+        let all = cams();
+        for (_, _, c) in library().iter().filter(|(_, _, c)| !c.markers.is_empty()) {
+            let paths: Vec<String> = c.markers.iter().map(|m| m.replace('*', "100")).collect();
+            let card = TempCard::new(&paths.iter().map(String::as_str).collect::<Vec<_>>());
+            let f = detect(&card.0, &all, None);
+            assert_eq!((f.camera.id.as_str(), f.how), (c.id.as_str(), How::Folders), "card for {}", c.id);
+        }
     }
 
     #[test]
     fn unknown_card_uses_fallback() {
-        let card = TempCard::new(&["DCIM/100CANON/IMG_0001.CR3"]);
-        let cams = builtins();
+        let card = TempCard::new(&["DCIM/100OLYMP/P1010001.ORF"]);
+        let cams = cams();
         let f = detect(&card.0, &cams, None);
         assert_eq!(f.camera.id, FALLBACK);
         assert_eq!(f.how, How::Unknown);
@@ -537,18 +587,26 @@ mod tests {
             r#"<Device manufacturer="Sony" modelName="ILCE-7M4" serialNo="1"/>"#,
         )
         .unwrap();
-        let mut cams = builtins();
+        let mut cams = cams();
         cams.push(Camera { id: "a7iv".into(), name: "A7 IV".into(), models: vec!["ILCE-7M4".into()], ..Default::default() });
         let f = detect(&card.0, &cams, None);
         assert_eq!(f.camera.id, "a7iv");
         assert_eq!(f.how, How::Model);
-        assert_eq!(f.model.as_deref(), Some("ILCE-7M4"));
+        assert_eq!(f.model.as_deref(), Some("Sony ILCE-7M4"));
+    }
+
+    #[test]
+    fn make_is_added_once() {
+        assert_eq!(with_make(Some("FUJIFILM".into()), "X-T5".into()), "FUJIFILM X-T5");
+        assert_eq!(with_make(Some("NIKON CORPORATION".into()), "NIKON Z 6_2".into()), "NIKON Z 6_2");
+        assert_eq!(with_make(Some("Apple".into()), "iPhone 15 Pro".into()), "Apple iPhone 15 Pro");
+        assert_eq!(with_make(None, "HERO12 Black".into()), "HERO12 Black");
     }
 
     #[test]
     fn remembered_card_wins() {
         let card = TempCard::new(&["DCIM/DJI_001/x.MP4"]);
-        let cams = builtins();
+        let cams = cams();
         let f = detect(&card.0, &cams, Some("sony-alpha"));
         assert_eq!((f.camera.id.as_str(), f.how), ("sony-alpha", How::Card));
     }
@@ -566,7 +624,7 @@ mod tests {
     #[test]
     fn sony_proxies_go_to_their_own_folder() {
         let card = TempCard::new(&["PRIVATE/M4ROOT/CLIP/C0001.MP4", "PRIVATE/M4ROOT/SUB/C0001S03.MP4"]);
-        let sony = builtins().remove(0);
+        let sony = lib("sony-alpha");
         let mut got = Vec::new();
         walk_media(&card.0, &sony.sources, &mut |p, _, e, src| {
             got.push((p.file_name().unwrap().to_string_lossy().into_owned(), type_for(&sony, src, e).map(str::to_string)));

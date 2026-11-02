@@ -32,13 +32,17 @@ The folder name is the capture date (`YYMMDD` or `YYYY-MM-DD`), taken from the f
 
 ## Cameras
 
-SWORTA does not need the camera, only the card. It reads the model name from the first photo or clip, and if there is none it goes by the folders the camera left behind. Sony Alpha and DJI Osmo Action are set up out of the box, anything else is sorted by sensible defaults until you set it up.
+SWORTA does not need the camera, only the card. It reads make and model from the first photo or clip, and if there is none it goes by the folders the camera left behind.
+
+Cameras come from a small library that lives in this repository under [`cameras/`](cameras), sorted into action, mirrorless, cinema, drone, 360 and phone. The CAMERAS page lists it with a search, and one click adds a camera. When an unknown card turns out to match a camera from the library, the card itself offers to add it. Nothing of that is baked into the exe: a new camera merged here shows up in every SWORTA right away, and without internet the last list is kept. Anything SWORTA cannot place at all is sorted by sensible defaults until you set it up.
 
 Setting up a camera happens on the card itself: plug it in, click **Set up**, and SWORTA lists what it found (`MP4 12 · LRF 12 · JPG 30`). You pick a folder for each file type or leave it empty to skip it, choose how the folders are laid out (`date/type`, `camera/date/type`, …) and optionally a fixed import folder for that camera. If a camera later writes a file type it has no folder for yet, the card says so instead of quietly leaving the files behind.
 
 Two cameras of the same brand can each get their own setup, the more specific model name wins (`ILCE-7M4` over `ILCE-`). If SWORTA cannot tell a card apart at all, pick the camera from the list on the card. That choice is remembered for the card until it gets formatted.
 
-Each camera is a small JSON file. **Export** on the camera page writes it out, **Import file** on another machine adds it, so a colleague can hand you their setup. The built-in ones live in [`cameras/`](cameras), and a pull request with a new file is the easiest way to add one for everybody.
+Each camera is a small JSON file. **Export** on the camera page writes it out, **Import file** on another machine adds it, so a colleague can hand you their setup. To add a camera for everybody, drop the exported file into the right folder of [`cameras/`](cameras) with a pull request; [`cameras/README.md`](cameras/README.md) explains the format.
+
+Phones connected by cable are not picked up yet. Windows shows an iPhone as a portable device without a drive letter, so for now the iPhone and Android profiles only help with a card or a copied `DCIM` folder.
 
 ## Notifications
 
