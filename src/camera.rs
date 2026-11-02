@@ -453,14 +453,16 @@ fn clean(s: &str) -> String {
 }
 
 /// Folder for one file: the layout filled in below the import folder.
+/// A type may hold subfolders (`VID/PROXY`); nothing can climb out of `dest`.
 pub fn target_dir(dest: &Path, layout: &str, date: &str, ty: &str, camera: &str) -> PathBuf {
+    let filled = layout
+        .replace('\\', "/")
+        .replace("{date}", &clean(date))
+        .replace("{camera}", &clean(camera))
+        .replace("{type}", &ty.replace('\\', "/"));
     let mut p = dest.to_path_buf();
-    for seg in segments(layout) {
-        let s = seg
-            .replace("{date}", &clean(date))
-            .replace("{type}", &clean(ty))
-            .replace("{camera}", &clean(camera));
-        let s = clean(&s);
+    for seg in segments(&filled) {
+        let s = clean(seg);
         let s = s.trim().trim_end_matches('.').trim();
         if !s.is_empty() {
             p.push(s);
@@ -601,7 +603,12 @@ mod tests {
         let dest = Path::new("D:\\Fotos");
         assert_eq!(target_dir(dest, "{date}/{type}", "261102", "VID", "X"), dest.join("261102").join("VID"));
         assert_eq!(target_dir(dest, "{camera}/{date}", "261102", "VID", "A7 IV"), dest.join("A7 IV").join("261102"));
-        assert_eq!(target_dir(dest, "../{type}", "d", "../x", "c"), dest.join(".._x"));
+        assert_eq!(target_dir(dest, "../{type}", "d", "../x", "c"), dest.join("x"));
+        assert_eq!(
+            target_dir(dest, "{date}/{type}", "261102", "VID/PROXY", "c"),
+            dest.join("261102").join("VID").join("PROXY")
+        );
+        assert_eq!(target_dir(dest, "{camera}", "d", "t", "A/B"), dest.join("A_B"));
     }
 
     #[test]

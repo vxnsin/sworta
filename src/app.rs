@@ -65,6 +65,7 @@ struct Editor {
     markers: String,
     sources: String,
     new_ext: String,
+    new_folder: String,
     custom_layout: bool,
     error: Option<String>,
 }
@@ -109,8 +110,34 @@ impl Editor {
             seen_model: None,
             found,
             new_ext: String::new(),
+            new_folder: String::new(),
             error: None,
         }
+    }
+
+    /// Adds a card folder and counts what is in it.
+    fn add_source(&mut self, folder: &str) {
+        let f = folder.replace('\\', "/").trim().trim_matches('/').to_string();
+        if f.is_empty() {
+            return;
+        }
+        let mut list = split_list(&self.sources);
+        if !list.iter().any(|s| s.eq_ignore_ascii_case(&f)) {
+            list.push(f);
+        }
+        self.sources = list.join(", ");
+        if let Some(root) = self.root.clone() {
+            self.found = camera::survey(Path::new(&root), &self.finished());
+            for e in self.found.exts.keys() {
+                self.cam.types.entry(e.clone()).or_insert_with(|| guess_type(e));
+            }
+        }
+    }
+
+    fn remove_source(&mut self, folder: &str) {
+        let list: Vec<String> = split_list(&self.sources).into_iter().filter(|s| s != folder).collect();
+        self.sources = list.join(", ");
+        self.cam.folders.remove(folder);
     }
 
     fn blank() -> Self {
@@ -643,6 +670,17 @@ fn how_text(c: &Card) -> String {
     }
 }
 
+/// `E:\PRIVATE\M4ROOT\SUB` below `E:\` → `PRIVATE/M4ROOT/SUB`.
+fn rel_to_root(root: &str, p: &Path) -> Option<String> {
+    let r = root.trim_end_matches(['\\', '/']).to_lowercase();
+    let s = p.to_string_lossy();
+    if !s.to_lowercase().starts_with(&r) {
+        return None;
+    }
+    let rel = s[r.len()..].trim_matches(['\\', '/']).replace('\\', "/");
+    (!rel.is_empty()).then_some(rel)
+}
+
 fn field(ui: &mut Ui, label: &str, v: &mut String) {
     ui.label(RichText::new(label).color(MUTED).size(11.0));
     ui.add(egui::TextEdit::singleline(v).desired_width(f32::INFINITY).font(FontId::monospace(12.0)));
@@ -665,7 +703,8 @@ fn editor_ui(ui: &mut Ui, ed: &mut Editor, s: &Settings) -> Option<EdAction> {
     ui.add_space(10.0);
 
     rule(ui, "02", "FILES");
-    note(ui, "Card folders: a folder name here takes everything in that folder, like proxies.");
+    note(ui, "Card folders. A target here takes everything in that folder, like proxies.");
+    let mut drop_src = None;
     for src in split_list(&ed.sources) {
         ui.horizontal(|ui| {
             ui.set_min_height(28.0);
@@ -673,6 +712,9 @@ fn editor_ui(ui: &mut Ui, ed: &mut Editor, s: &Settings) -> Option<EdAction> {
             let n = ed.found.folders.get(&src).map(|n| format!("{n}")).unwrap_or_default();
             ui.label(RichText::new(n).color(MUTED).size(11.0));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if btn(ui, "×", Btn::Ghost, true) {
+                    drop_src = Some(src.clone());
+                }
                 let v = ed.cam.folders.entry(src.clone()).or_default();
                 ui.add(
                     egui::TextEdit::singleline(v)
@@ -684,6 +726,31 @@ fn editor_ui(ui: &mut Ui, ed: &mut Editor, s: &Settings) -> Option<EdAction> {
             });
         });
     }
+    if let Some(s) = drop_src {
+        ed.remove_source(&s);
+    }
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut ed.new_folder)
+                .hint_text("folder on the card")
+                .desired_width(150.0)
+                .font(FontId::monospace(12.0)),
+        );
+        if btn(ui, "ADD", Btn::Ghost, !ed.new_folder.trim().is_empty()) {
+            let f = std::mem::take(&mut ed.new_folder);
+            ed.add_source(&f);
+        }
+        if let Some(root) = ed.root.clone() {
+            if btn(ui, "PICK ON CARD", Btn::Ghost, true) {
+                if let Some(p) = rfd::FileDialog::new().set_directory(&root).pick_folder() {
+                    match rel_to_root(&root, &p) {
+                        Some(f) => ed.add_source(&f),
+                        None => ed.error = Some(format!("Pick a folder on the card {root}.")),
+                    }
+                }
+            }
+        }
+    });
     ui.add_space(6.0);
     note(ui, "File types everywhere else:");
     let keys: Vec<String> = ed.cam.types.keys().cloned().collect();
@@ -726,7 +793,7 @@ fn editor_ui(ui: &mut Ui, ed: &mut Editor, s: &Settings) -> Option<EdAction> {
             ed.new_ext.clear();
         }
     });
-    note(ui, "Folder per file type. Empty means the type is not imported.");
+    note(ui, "Empty means the type is not imported. Use / for subfolders, like VID/PROXY.");
     ui.add_space(10.0);
 
     rule(ui, "03", "DESTINATION");
