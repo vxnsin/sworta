@@ -42,7 +42,7 @@ Two cameras of the same brand can each get their own setup, the more specific mo
 
 Each camera is a small JSON file. **Export** on the camera page writes it out, **Import file** on another machine adds it, so a colleague can hand you their setup. To add a camera for everybody, drop the exported file into the right folder of [`cameras/`](cameras) with a pull request; [`cameras/README.md`](cameras/README.md) explains the format.
 
-Phones connected by cable are not picked up yet. Windows shows an iPhone as a portable device without a drive letter, so for now the iPhone and Android profiles only help with a card or a copied `DCIM` folder.
+Phones plugged in by cable show up like a card. Windows gives an iPhone or an Android phone no drive letter, so SWORTA reads it the way Explorer does: unlock the phone, allow access if it asks, and the card fills in while the files are listed. A full phone can take a few minutes for that, and an iPhone that keeps photos in iCloud first has to fetch them. Files come off a phone one at a time, and unplugging it in the middle stops the read or the import cleanly.
 
 ## Notifications
 
