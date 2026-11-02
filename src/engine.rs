@@ -652,7 +652,9 @@ pub fn start_import(h: &Handle, ctx: &eframe::egui::Context, root: &str, dest: P
             },
         );
         let s = &g.settings;
-        (card, s.long_date, s.parallel.clamp(1, 4) as usize, cancel)
+        // A phone hands out one file at a time; a second one only comes back as "busy".
+        let workers = if card.device { 1 } else { s.parallel.clamp(1, 4) as usize };
+        (card, s.long_date, workers, cancel)
     };
 
     let next = Arc::new(AtomicUsize::new(0));
@@ -789,6 +791,13 @@ fn copy_one(it: &Item, dir: &Path, on_bytes: &mut dyn FnMut(u64) -> bool) -> std
 
     let res = write_file(it, &target, on_bytes);
     RESERVED.lock().unwrap().remove(&target);
+    if res.is_err() {
+        // Leave no empty type and day folders behind; remove_dir only takes empty ones.
+        let _ = fs::remove_dir(dir);
+        if let Some(day) = dir.parent() {
+            let _ = fs::remove_dir(day);
+        }
+    }
     res.map(|_| true)
 }
 

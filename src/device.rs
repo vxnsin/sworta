@@ -15,7 +15,7 @@ use std::{
 };
 use windows::{
     Win32::{
-        Foundation::{FILETIME, HWND, S_OK},
+        Foundation::{ERROR_BUSY, FILETIME, HWND, S_OK},
         Storage::EnhancedStorage::{PKEY_DateModified, PKEY_Size},
         System::{
             Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree, IStream},
@@ -250,8 +250,18 @@ pub struct Reader(IStream);
 pub fn read(pidl: &[u8]) -> io::Result<Reader> {
     let it = unsafe { SHCreateItemFromIDList::<IShellItem>(pidl.as_ptr() as *const ITEMIDLIST) }
         .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "the file is gone from the device"))?;
-    let s = unsafe { it.BindToHandler::<_, IStream>(None, &BHID_Stream) }.map_err(io::Error::other)?;
-    Ok(Reader(s))
+    // Right after a listing or another file the phone can still say "busy" for a moment.
+    let mut tries = 0;
+    loop {
+        match unsafe { it.BindToHandler::<_, IStream>(None, &BHID_Stream) } {
+            Ok(s) => return Ok(Reader(s)),
+            Err(e) if e.code() == ERROR_BUSY.to_hresult() && tries < 10 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            Err(e) => return Err(io::Error::other(e)),
+        }
+    }
 }
 
 impl io::Read for Reader {
