@@ -25,6 +25,8 @@ pub struct Camera {
     pub models: Vec<String>,
     /// Paths only this camera creates on a card, `*` matches inside one folder name.
     pub markers: Vec<String>,
+    /// Names Windows shows for the device plugged in by cable ("Apple iPhone"); a part is enough.
+    pub devices: Vec<String>,
     /// Folders on the card that hold the media.
     pub sources: Vec<String>,
     /// Lowercase extension → subfolder at the destination, empty = skip.
@@ -117,6 +119,7 @@ pub fn parse(text: &str) -> Result<Camera, String> {
         .collect();
     clean_list(&mut c.models);
     clean_list(&mut c.markers);
+    clean_list(&mut c.devices);
     clean_list(&mut c.sources);
     if c.sources.is_empty() {
         c.sources.push("DCIM".into());
@@ -187,12 +190,12 @@ fn norm(s: &str) -> String {
     s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }
 
-fn segments(p: &str) -> Vec<&str> {
+pub fn segments(p: &str) -> Vec<&str> {
     p.split(['/', '\\']).filter(|s| !s.is_empty()).collect()
 }
 
 /// Case-insensitive match with `*` for any run of characters.
-fn seg_match(pat: &str, name: &str) -> bool {
+pub fn seg_match(pat: &str, name: &str) -> bool {
     let (pat, name) = (pat.to_lowercase(), name.to_lowercase());
     let parts: Vec<&str> = pat.split('*').collect();
     if parts.len() == 1 {
@@ -329,6 +332,44 @@ pub fn detect<'a>(root: &Path, cameras: &'a [Camera], remembered: Option<&str>) 
         .iter()
         .filter_map(|c| {
             let hits = c.markers.iter().filter(|m| has_path(root, m)).count();
+            (hits > 0).then_some((c, hits))
+        })
+        .max_by_key(|(_, hits)| *hits);
+    match by_folder {
+        Some((c, _)) => Found { camera: c, how: How::Folders, model },
+        None => Found { camera: fallback, how: How::Unknown, model },
+    }
+}
+
+/// Picks the camera for a device plugged in by cable: remembered device, then its name, then its folders.
+pub fn detect_device<'a>(
+    name: &str,
+    has_path: &dyn Fn(&str) -> bool,
+    cameras: &'a [Camera],
+    remembered: Option<&str>,
+) -> Found<'a> {
+    let fallback = cameras
+        .iter()
+        .find(|c| c.id == FALLBACK)
+        .or(cameras.last())
+        .expect("at least the built-in cameras");
+    if let Some(c) = remembered.and_then(|id| cameras.iter().find(|c| c.id == id)) {
+        return Found { camera: c, how: How::Card, model: None };
+    }
+    let model = Some(name.to_string());
+    let n = norm(name);
+    let by_name = cameras
+        .iter()
+        .flat_map(|c| c.devices.iter().map(move |p| (c, norm(p))))
+        .filter(|(_, p)| !p.is_empty() && n.contains(p.as_str()))
+        .max_by_key(|(_, p)| p.len());
+    if let Some((c, _)) = by_name {
+        return Found { camera: c, how: How::Model, model };
+    }
+    let by_folder = cameras
+        .iter()
+        .filter_map(|c| {
+            let hits = c.markers.iter().filter(|m| has_path(m)).count();
             (hits > 0).then_some((c, hits))
         })
         .max_by_key(|(_, hits)| *hits);
@@ -555,7 +596,11 @@ mod tests {
             assert_eq!(stem, &c.id, "file name and id differ for {}", c.name);
             assert_ne!(c.id, FALLBACK);
             assert!(ids.insert(c.id.clone()), "id {} used twice", c.id);
-            assert!(!c.markers.is_empty() || !c.models.is_empty(), "{} can never be recognised", c.id);
+            assert!(
+                !c.markers.is_empty() || !c.models.is_empty() || !c.devices.is_empty(),
+                "{} can never be recognised",
+                c.id
+            );
         }
     }
 
@@ -593,6 +638,17 @@ mod tests {
         assert_eq!(f.camera.id, "a7iv");
         assert_eq!(f.how, How::Model);
         assert_eq!(f.model.as_deref(), Some("Sony ILCE-7M4"));
+    }
+
+    #[test]
+    fn phones_by_device_name_and_folders() {
+        let cams = cams();
+        let iphone = detect_device("Apple iPhone", &|_| false, &cams, None);
+        assert_eq!((iphone.camera.id.as_str(), iphone.how), ("iphone", How::Model));
+        let pixel = detect_device("Pixel 8", &|p| p == "DCIM/Camera", &cams, None);
+        assert_eq!((pixel.camera.id.as_str(), pixel.how), ("android", How::Folders));
+        let kindle = detect_device("Kindle", &|_| false, &cams, None);
+        assert_eq!(kindle.how, How::Unknown);
     }
 
     #[test]

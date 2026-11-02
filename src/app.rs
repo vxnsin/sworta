@@ -32,6 +32,7 @@ const FG: Color32 = Color32::from_rgb(236, 236, 236);
 const RED: Color32 = Color32::from_rgb(215, 25, 33);
 
 const FULL: egui::Vec2 = vec2(460.0, 760.0);
+const MIN_FULL: egui::Vec2 = vec2(420.0, 520.0);
 const POPUP: egui::Vec2 = vec2(390.0, 176.0);
 const DEMO: &str = "DEMO";
 
@@ -58,12 +59,15 @@ struct Editor {
     orig: Option<String>,
     /// Card the editor was opened from; a new camera is remembered for it.
     root: Option<String>,
+    /// That card is a device plugged in by cable, not a drive.
+    device: bool,
     /// Model name that card reported.
     seen_model: Option<String>,
     /// What is on that card.
     found: camera::Survey,
     models: String,
     markers: String,
+    devices: String,
     sources: String,
     new_ext: String,
     new_folder: String,
@@ -103,6 +107,8 @@ impl Editor {
         Self {
             models: cam.models.join(", "),
             markers: cam.markers.join(", "),
+            devices: cam.devices.join(", "),
+            device: false,
             sources: cam.sources.join(", "),
             custom_layout: !LAYOUTS.iter().any(|(_, l)| *l == cam.layout),
             cam,
@@ -127,7 +133,7 @@ impl Editor {
             list.push(f);
         }
         self.sources = list.join(", ");
-        if let Some(root) = self.root.clone() {
+        if let (Some(root), false) = (self.root.clone(), self.device) {
             self.found = camera::survey(Path::new(&root), &self.finished());
             for e in self.found.exts.keys() {
                 self.cam.types.entry(e.clone()).or_insert_with(|| guess_type(e));
@@ -153,12 +159,15 @@ impl Editor {
     }
 
     fn from_card(card: &Card) -> Self {
-        let found = camera::survey(Path::new(&card.root), &card.camera);
+        let found = engine::survey(card, &card.camera);
         let mut ed = if card.how == How::Unknown {
             // Start from what is on the card, not from the long default list.
+            // A device reports its name, a card the model from its photos.
+            let named: Vec<String> = card.model.iter().cloned().collect();
             let cam = Camera {
                 name: card.model.clone().unwrap_or_else(|| "New camera".into()),
-                models: card.model.iter().cloned().collect(),
+                models: if card.device { Vec::new() } else { named.clone() },
+                devices: if card.device { named } else { Vec::new() },
                 sources: card.camera.sources.clone(),
                 layout: card.camera.layout.clone(),
                 ..Default::default()
@@ -168,6 +177,7 @@ impl Editor {
             Self::new(card.camera.clone(), Some(card.camera.id.clone()), Some(card.root.clone()), found)
         };
         ed.seen_model = card.model.clone();
+        ed.device = card.device;
         ed
     }
 
@@ -176,6 +186,7 @@ impl Editor {
         c.name = c.name.trim().to_string();
         c.models = split_list(&self.models);
         c.markers = split_list(&self.markers);
+        c.devices = split_list(&self.devices);
         c.sources = split_list(&self.sources);
         let sources = c.sources.clone();
         c.folders.retain(|k, v| sources.contains(k) && !v.trim().is_empty());
@@ -195,6 +206,9 @@ pub struct App {
     tab: Tab,
     mode: Mode,
     popup_since: Instant,
+    /// Size of the main window, kept while the popup uses the same window.
+    full_size: egui::Vec2,
+    size_dirty: bool,
     done_seen: Option<Instant>,
     synced: bool,
     editor: Option<Editor>,
@@ -252,6 +266,7 @@ impl App {
         apply_style(&ctx);
 
         let settings = config::load();
+        let full_size = settings.window.map_or(FULL, |[w, h]| vec2(w, h));
         if !cfg!(debug_assertions) {
             config::set_autostart(settings.autostart);
         }
@@ -262,6 +277,7 @@ impl App {
             cameras: camera::load_all(),
             library: library::load_cache(),
             picked: HashMap::new(),
+            reading: Default::default(),
             update: Default::default(),
             popup_request: None,
             want_full: false,
@@ -305,6 +321,8 @@ impl App {
             tab: Tab::Home,
             mode: if hidden { Mode::Hidden } else { Mode::Full },
             popup_since: Instant::now(),
+            full_size,
+            size_dirty: false,
             done_seen: None,
             synced: false,
             editor: None,
@@ -319,10 +337,13 @@ impl App {
         let ppp = ctx.pixels_per_point();
         let (l, t, r, b) = work_area();
         let (w, h) = ((r - l) / ppp, (b - t) / ppp);
-        ctx.send_viewport_cmd(VC::InnerSize(FULL));
+        let size = self.full_size.min(vec2(w, h)).max(MIN_FULL);
+        ctx.send_viewport_cmd(VC::Resizable(true));
+        ctx.send_viewport_cmd(VC::MinInnerSize(MIN_FULL));
+        ctx.send_viewport_cmd(VC::InnerSize(size));
         ctx.send_viewport_cmd(VC::OuterPosition(pos2(
-            l / ppp + (w - FULL.x) / 2.0,
-            t / ppp + ((h - FULL.y) / 2.0).max(0.0),
+            l / ppp + ((w - size.x) / 2.0).max(0.0),
+            t / ppp + ((h - size.y) / 2.0).max(0.0),
         )));
         ctx.send_viewport_cmd(VC::WindowLevel(WindowLevel::Normal));
         ctx.send_viewport_cmd(VC::Visible(true));
@@ -334,6 +355,9 @@ impl App {
     fn enter_popup(&mut self, ctx: &egui::Context, root: String) {
         let ppp = ctx.pixels_per_point();
         let (_, _, r, b) = work_area();
+        self.save_size();
+        ctx.send_viewport_cmd(VC::Resizable(false));
+        ctx.send_viewport_cmd(VC::MinInnerSize(POPUP));
         ctx.send_viewport_cmd(VC::InnerSize(POPUP));
         ctx.send_viewport_cmd(VC::OuterPosition(pos2(
             r / ppp - POPUP.x - 16.0,
@@ -347,8 +371,59 @@ impl App {
     }
 
     fn hide(&mut self, ctx: &egui::Context) {
+        self.save_size();
         ctx.send_viewport_cmd(VC::Visible(false));
         self.mode = Mode::Hidden;
+    }
+
+    /// Follows the window size while the main window is open.
+    fn track_size(&mut self, ctx: &egui::Context) {
+        let Some(r) = ctx.input(|i| i.viewport().inner_rect) else { return };
+        let s = r.size();
+        // Right after leaving the popup the old small size can still come in.
+        if s.x + 1.0 >= MIN_FULL.x && s.y + 1.0 >= MIN_FULL.y && (s - self.full_size).length() > 1.0 {
+            self.full_size = s;
+            self.size_dirty = true;
+        }
+        if self.size_dirty && !ctx.input(|i| i.pointer.any_down()) {
+            self.save_size();
+        }
+    }
+
+    fn save_size(&mut self) {
+        if !self.size_dirty {
+            return;
+        }
+        self.size_dirty = false;
+        let mut g = self.h.lock().unwrap();
+        g.settings.window = Some([self.full_size.x.round(), self.full_size.y.round()]);
+        config::save(&g.settings);
+    }
+
+    /// Thin zones along the edges of the borderless window that resize it.
+    fn resize_edges(&self, ui: &mut Ui, ctx: &egui::Context) {
+        use egui::{ResizeDirection as D, viewport::ViewportCommand as V};
+        let r = ui.max_rect();
+        let (e, c) = (5.0, 14.0);
+        let zones = [
+            (Rect::from_min_max(pos2(r.left() + c, r.bottom() - e), pos2(r.right() - c, r.bottom())), D::South, CursorIcon::ResizeVertical),
+            (Rect::from_min_max(pos2(r.left() + c, r.top()), pos2(r.right() - c, r.top() + e)), D::North, CursorIcon::ResizeVertical),
+            (Rect::from_min_max(pos2(r.right() - e, r.top() + c), pos2(r.right(), r.bottom() - c)), D::East, CursorIcon::ResizeHorizontal),
+            (Rect::from_min_max(pos2(r.left(), r.top() + c), pos2(r.left() + e, r.bottom() - c)), D::West, CursorIcon::ResizeHorizontal),
+            (Rect::from_min_max(pos2(r.right() - c, r.bottom() - c), r.max), D::SouthEast, CursorIcon::ResizeNwSe),
+            (Rect::from_min_max(pos2(r.left(), r.bottom() - c), pos2(r.left() + c, r.bottom())), D::SouthWest, CursorIcon::ResizeNeSw),
+            (Rect::from_min_max(pos2(r.right() - c, r.top()), pos2(r.right(), r.top() + e)), D::NorthEast, CursorIcon::ResizeNeSw),
+            (Rect::from_min_max(r.min, pos2(r.left() + c, r.top() + e)), D::NorthWest, CursorIcon::ResizeNwSe),
+        ];
+        for (i, (zone, dir, cursor)) in zones.into_iter().enumerate() {
+            let resp = ui.interact(zone, ui.scope_id().with(("resize", i)), Sense::drag());
+            if resp.hovered() || resp.dragged() {
+                ctx.set_cursor_icon(cursor);
+            }
+            if resp.drag_started() {
+                ctx.send_viewport_cmd(V::BeginResize(dir));
+            }
+        }
     }
 
     /// Applies requests that background threads left in the shared state.
@@ -667,6 +742,11 @@ fn fmt_eta(p: &Progress) -> String {
 fn demo_card() -> Card {
     Card {
         root: "E:\\".into(),
+        title: "E:\\".into(),
+        device: false,
+        hint: None,
+        locked: false,
+        listed: None,
         serial: None,
         camera: camera::builtins().remove(0),
         how: How::Model,
@@ -690,6 +770,9 @@ fn recognised(cam: &Camera) -> String {
     }
     if !cam.markers.is_empty() {
         parts.push(format!("folders {}", cam.markers.join(", ")));
+    }
+    if !cam.devices.is_empty() {
+        parts.push(format!("device {}", cam.devices.join(", ")));
     }
     if parts.is_empty() { "only cards picked by hand".into() } else { parts.join(" · ") }
 }
@@ -732,6 +815,7 @@ fn editor_ui(ui: &mut Ui, ed: &mut Editor, s: &Settings) -> Option<EdAction> {
         note(ui, format!("This card says: {m}"));
     }
     field(ui, "Folders only this camera makes (DCIM/DJI_*)", &mut ed.markers);
+    field(ui, "Device name when plugged in by cable (iPhone)", &mut ed.devices);
     field(ui, "Folders with photos and videos", &mut ed.sources);
     ui.add_space(10.0);
 
@@ -773,7 +857,7 @@ fn editor_ui(ui: &mut Ui, ed: &mut Editor, s: &Settings) -> Option<EdAction> {
             let f = std::mem::take(&mut ed.new_folder);
             ed.add_source(&f);
         }
-        if let Some(root) = ed.root.clone() {
+        if let (Some(root), false) = (ed.root.clone(), ed.device) {
             if btn(ui, "PICK ON CARD", Btn::Ghost, true) {
                 if let Some(p) = rfd::FileDialog::new().set_directory(&root).pick_folder() {
                     match rel_to_root(&root, &p) {
@@ -907,8 +991,16 @@ fn editor_ui(ui: &mut Ui, ed: &mut Editor, s: &Settings) -> Option<EdAction> {
     act
 }
 
-fn drive_label(root: &str) -> String {
-    root.chars().take(2).collect::<String>().to_uppercase()
+/// Big dotted label next to a card: the drive letter, or two letters of the device name.
+fn card_label(root: &str, card: Option<&Card>) -> String {
+    match card {
+        Some(c) if c.device => {
+            let n = c.title.strip_prefix("Apple ").unwrap_or(&c.title);
+            n.chars().filter(|c| c.is_ascii_alphanumeric()).take(2).collect::<String>().to_uppercase()
+        }
+        _ if root.starts_with("::") => "PH".into(),
+        _ => root.chars().take(2).collect::<String>().to_uppercase(),
+    }
 }
 
 // ---------- screens ----------
@@ -996,6 +1088,7 @@ impl App {
     }
 
     fn full_ui(&mut self, ui: &mut Ui, ctx: &egui::Context, snap: &Snap) {
+        self.track_size(ctx);
         match self.titlebar(ui, ctx) {
             Some(Bar::Min) => ctx.send_viewport_cmd(VC::Minimized(true)),
             Some(Bar::Close) => self.hide(ctx),
@@ -1051,6 +1144,8 @@ impl App {
                 }
             });
         });
+        // Last, so the edges win over the title bar and the content below them.
+        self.resize_edges(ui, ctx);
     }
 
     fn home(&mut self, ui: &mut Ui, ctx: &egui::Context, snap: &Snap) {
@@ -1106,17 +1201,23 @@ impl App {
             let job = snap.jobs.get(&root);
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                dot_text(ui, &drive_label(&root), 6.0, FG);
+                dot_text(ui, &card_label(&root, card), 6.0, FG);
                 ui.add_space(6.0);
                 ui.vertical(|ui| {
                     ui.add_space(4.0);
                     match card {
                         Some(c) => {
+                            if c.device {
+                                ui.label(RichText::new(&c.title).color(MUTED).size(11.0));
+                            }
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(&c.camera.name).size(12.0));
                                 ui.label(RichText::new(how_text(c)).color(MUTED).size(11.0));
                             });
-                            ui.label(RichText::new(c.summary()).size(12.0));
+                            match &c.hint {
+                                Some(h) => ui.label(RichText::new(h).color(if c.locked { RED } else { MUTED }).size(12.0)),
+                                None => ui.label(RichText::new(c.summary()).size(12.0)),
+                            };
                             ui.label(RichText::new(fmt_bytes(c.bytes)).color(MUTED).size(12.0));
                         }
                         None => {
@@ -1244,7 +1345,7 @@ impl App {
         }
         if let Some(cam) = edit {
             let card = snap.cards.iter().find(|c| c.camera.id == cam.id);
-            let found = card.map(|c| camera::survey(Path::new(&c.root), &cam)).unwrap_or_default();
+            let found = card.map(|c| engine::survey(c, &cam)).unwrap_or_default();
             self.editor = Some(Editor::new(cam.clone(), Some(cam.id.clone()), None, found));
         }
         ui.add_space(8.0);
@@ -1529,7 +1630,7 @@ impl App {
 
         Frame::new().inner_margin(Margin::symmetric(20, 4)).show(ui, |ui| {
             ui.horizontal(|ui| {
-                dot_text(ui, &drive_label(&key), 5.0, FG);
+                dot_text(ui, &card_label(&key, card.as_ref()), 5.0, FG);
                 ui.add_space(4.0);
                 ui.vertical(|ui| {
                     if let Some(c) = &card {
@@ -1539,7 +1640,10 @@ impl App {
                             _ => c.camera.name.clone(),
                         };
                         ui.label(RichText::new(name).size(12.0));
-                        ui.label(RichText::new(format!("{}  ·  {}", c.summary(), fmt_bytes(c.bytes))).color(MUTED).size(11.5));
+                        match &c.hint {
+                            Some(h) => ui.label(RichText::new(h).color(if c.locked { RED } else { MUTED }).size(11.5)),
+                            None => ui.label(RichText::new(format!("{}  ·  {}", c.summary(), fmt_bytes(c.bytes))).color(MUTED).size(11.5)),
+                        };
                     }
                 });
             });

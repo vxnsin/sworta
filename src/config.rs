@@ -48,6 +48,8 @@ pub struct Settings {
     pub popup_secs: u32,
     /// Volume serial of a card → camera the user picked for it.
     pub cards: HashMap<String, String>,
+    /// Size of the main window as the user left it.
+    pub window: Option<[f32; 2]>,
 }
 
 impl Default for Settings {
@@ -66,6 +68,7 @@ impl Default for Settings {
             speed_limit: 0,
             popup_secs: 12,
             cards: HashMap::new(),
+            window: None,
         }
     }
 }

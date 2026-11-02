@@ -3,6 +3,7 @@
 mod app;
 mod camera;
 mod config;
+mod device;
 mod dots;
 mod engine;
 mod library;
@@ -34,9 +35,9 @@ fn main() -> eframe::Result {
 
     let viewport = egui::ViewportBuilder::default()
         .with_title("SWORTA")
-        .with_inner_size([460.0, 760.0])
+        .with_inner_size(config::load().window.unwrap_or([460.0, 760.0]))
         .with_decorations(false)
-        .with_resizable(false)
+        .with_resizable(true)
         .with_maximize_button(false)
         .with_visible(!hidden)
         .with_icon(egui::IconData {

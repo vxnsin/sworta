@@ -3,7 +3,8 @@
   "name": "iPhone",
   "models": ["Apple iPhone"],
   "markers": ["DCIM/*APPLE"],
-  "sources": ["DCIM"],
+  "devices": ["iPhone"],
+  "sources": ["."],
   "types": {
     "heic": "PHOTO",
     "jpg": "PHOTO",
