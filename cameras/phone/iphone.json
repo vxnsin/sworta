@@ -7,6 +7,9 @@
   "sources": ["."],
   "types": {
     "heic": "PHOTO",
+    "jpeg": "PHOTO",
+    "gif": "PHOTO",
+    "avif": "PHOTO",
     "jpg": "PHOTO",
     "webp": "PHOTO",
     "dng": "RAW",

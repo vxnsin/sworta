@@ -9,6 +9,8 @@
     "jpeg": "PHOTO",
     "heic": "PHOTO",
     "webp": "PHOTO",
+    "gif": "PHOTO",
+    "avif": "PHOTO",
     "dng": "RAW",
     "png": "PHOTO",
     "mp4": "VID",
