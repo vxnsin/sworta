@@ -1,5 +1,5 @@
 use serde::{Deserialize, Deserializer, Serialize};
-use std::{fs, path::PathBuf};
+use std::{collections::HashMap, fs, path::PathBuf};
 use winreg::{enums::*, RegKey};
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -46,6 +46,8 @@ pub struct Settings {
     pub speed_limit: u32,
     /// Seconds the popup stays, 0 = until dismissed.
     pub popup_secs: u32,
+    /// Volume serial of a card → camera the user picked for it.
+    pub cards: HashMap<String, String>,
 }
 
 impl Default for Settings {
@@ -63,6 +65,7 @@ impl Default for Settings {
             parallel: 2,
             speed_limit: 0,
             popup_secs: 12,
+            cards: HashMap::new(),
         }
     }
 }

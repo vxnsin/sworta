@@ -1,6 +1,6 @@
-use chrono::{DateTime, Local};
+use chrono::NaiveDate;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -12,29 +12,17 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use crate::config::{Notify, Settings};
-
-#[derive(Clone, Copy, PartialEq)]
-pub enum Kind {
-    Jpg,
-    Raw,
-    Vid,
-}
-
-impl Kind {
-    pub fn dir(self) -> &'static str {
-        match self {
-            Kind::Jpg => "JPG",
-            Kind::Raw => "RAW",
-            Kind::Vid => "VID",
-        }
-    }
-}
+use crate::{
+    camera::{self, Camera, How},
+    config::{Notify, Settings},
+};
 
 #[derive(Clone)]
 pub struct Item {
     pub src: PathBuf,
-    pub kind: Kind,
+    /// Subfolder at the destination, from the camera's rules.
+    pub ty: String,
+    pub date: NaiveDate,
     pub mtime: SystemTime,
     pub size: u64,
 }
@@ -42,11 +30,39 @@ pub struct Item {
 #[derive(Clone)]
 pub struct Card {
     pub root: String,
+    pub serial: Option<String>,
+    pub camera: Camera,
+    pub how: How,
+    /// Model name read from the files, if any.
+    pub model: Option<String>,
     pub items: Arc<Vec<Item>>,
-    pub jpg: usize,
-    pub raw: usize,
-    pub vid: usize,
+    /// Files per destination subfolder.
+    pub counts: BTreeMap<String, usize>,
+    /// Extensions the camera has no rule for, with their file count; these are not imported.
+    pub unsorted: BTreeMap<String, usize>,
     pub bytes: u64,
+}
+
+impl Card {
+    pub fn summary(&self) -> String {
+        if self.counts.is_empty() {
+            return "no files to import".into();
+        }
+        self.counts.iter().map(|(t, n)| format!("{t} {n}")).collect::<Vec<_>>().join("   ")
+    }
+
+    pub fn unsorted_line(&self) -> String {
+        self.unsorted
+            .iter()
+            .map(|(e, n)| format!("{} {n}", e.to_uppercase()))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+
+    /// No camera matched, or files showed up that the camera has no rule for.
+    pub fn needs_setup(&self) -> bool {
+        self.how == How::Unknown || !self.unsorted.is_empty()
+    }
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -96,6 +112,9 @@ pub struct Shared {
     /// One job per drive root, kept until the user dismisses it.
     pub jobs: HashMap<String, Progress>,
     pub settings: Settings,
+    pub cameras: Vec<Camera>,
+    /// Camera picked by hand per drive root, for cards without a volume serial.
+    pub picked: HashMap<String, String>,
     pub update: crate::update::Update,
     /// Set by background threads, picked up by the UI thread.
     pub popup_request: Option<String>,
@@ -108,54 +127,90 @@ pub fn any_running(g: &Shared) -> bool {
     g.jobs.values().any(|p| p.state == State::Running)
 }
 
-fn walk(dir: &Path, f: &mut dyn FnMut(&Path, &fs::Metadata)) {
-    let Ok(rd) = fs::read_dir(dir) else { return };
-    for e in rd.flatten() {
-        let p = e.path();
-        let Ok(md) = e.metadata() else { continue };
-        if md.is_dir() {
-            walk(&p, f);
-        } else {
-            f(&p, &md);
-        }
-    }
-}
-
-fn ext(p: &Path) -> String {
-    p.extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default()
-}
-
-fn scan(root: &str) -> Card {
-    let mut items = Vec::new();
+fn scan(root: &str, cameras: &[Camera], pick: Option<&str>) -> Card {
     let base = Path::new(root);
-    let mut add = |kind: Kind, p: &Path, md: &fs::Metadata| {
-        let Ok(mtime) = md.modified() else { return };
-        items.push(Item { src: p.to_path_buf(), kind, mtime, size: md.len() });
-    };
+    let serial = camera::volume_serial(root);
+    let found = camera::detect(base, cameras, pick);
+    let cam = found.camera.clone();
 
-    walk(&base.join("DCIM"), &mut |p, md| match ext(p).as_str() {
-        "jpg" | "jpeg" => add(Kind::Jpg, p, md),
-        "arw" => add(Kind::Raw, p, md),
-        _ => {}
-    });
-    walk(&base.join("PRIVATE").join("M4ROOT").join("CLIP"), &mut |p, md| {
-        if matches!(ext(p).as_str(), "mp4" | "xml") {
-            add(Kind::Vid, p, md);
+    let mut items = Vec::new();
+    let mut unsorted = BTreeMap::new();
+    camera::walk_media(base, &cam.sources, &mut |p, md, ext| match cam.types.get(ext) {
+        None => *unsorted.entry(ext.to_string()).or_insert(0) += 1,
+        Some(ty) if ty.is_empty() => {}
+        Some(ty) => {
+            let Ok(mtime) = md.modified() else { return };
+            items.push(Item {
+                src: p.to_path_buf(),
+                ty: ty.clone(),
+                date: camera::shoot_date(&cam, p, mtime),
+                mtime,
+                size: md.len(),
+            });
         }
     });
 
     items.sort_by(|a, b| a.src.cmp(&b.src));
-    let count = |k: Kind| items.iter().filter(|i| i.kind == k).count();
+    let mut counts = BTreeMap::new();
+    for it in &items {
+        *counts.entry(it.ty.clone()).or_insert(0) += 1;
+    }
     Card {
         root: root.to_string(),
-        jpg: count(Kind::Jpg),
-        raw: count(Kind::Raw),
-        vid: count(Kind::Vid),
+        serial,
+        camera: cam,
+        how: found.how,
+        model: found.model,
+        counts,
+        unsorted,
         bytes: items.iter().map(|i| i.size).sum(),
         items: Arc::new(items),
     }
+}
+
+/// Camera the user chose for this card earlier, by volume serial or for this session.
+fn picked_for(g: &Shared, root: &str, serial: Option<&String>) -> Option<String> {
+    g.picked
+        .get(root)
+        .or_else(|| serial.and_then(|s| g.settings.cards.get(s)))
+        .cloned()
+}
+
+/// Remembers the camera for a card (until it is formatted) and sorts it again.
+pub fn assign(h: &Handle, ctx: &eframe::egui::Context, root: &str, camera_id: &str) {
+    {
+        let mut g = h.lock().unwrap();
+        g.picked.insert(root.to_string(), camera_id.to_string());
+        let serial = g.cards.iter().find(|c| c.root == root).and_then(|c| c.serial.clone());
+        if let Some(s) = serial {
+            g.settings.cards.insert(s, camera_id.to_string());
+            crate::config::save(&g.settings);
+        }
+    }
+    rescan_all(h, ctx);
+}
+
+/// Sorts every inserted card again, after cameras were changed. Running imports keep their list.
+pub fn rescan_all(h: &Handle, ctx: &eframe::egui::Context) {
+    let (h, ctx) = (h.clone(), ctx.clone());
+    thread::spawn(move || {
+        let roots: Vec<String> = h.lock().unwrap().cards.iter().map(|c| c.root.clone()).collect();
+        for root in roots {
+            let (cams, pick) = {
+                let g = h.lock().unwrap();
+                if g.jobs.get(&root).is_some_and(|p| p.state == State::Running) {
+                    continue;
+                }
+                let serial = camera::volume_serial(&root);
+                (g.cameras.clone(), picked_for(&g, &root, serial.as_ref()))
+            };
+            let card = scan(&root, &cams, pick.as_deref());
+            if let Some(slot) = h.lock().unwrap().cards.iter_mut().find(|c| c.root == root) {
+                *slot = card;
+            }
+            ctx.request_repaint();
+        }
+    });
 }
 
 /// Asks the UI thread to open the full window.
@@ -186,14 +241,19 @@ pub fn spawn_watcher(h: Handle, ctx: eframe::egui::Context) {
             .map_or('C', |c| c.to_ascii_uppercase());
         let mut known: HashSet<char> = HashSet::new();
         loop {
+            let cams = h.lock().unwrap().cameras.clone();
             for l in 'D'..='Z' {
                 if l == sys {
                     continue;
                 }
                 let root = format!("{l}:\\");
-                let present = Path::new(&format!("{root}DCIM")).is_dir();
+                let present = Path::new(&root).is_dir() && camera::looks_like_card(Path::new(&root), &cams);
                 if present && known.insert(l) {
-                    let card = scan(&root);
+                    let pick = {
+                        let g = h.lock().unwrap();
+                        picked_for(&g, &root, camera::volume_serial(&root).as_ref())
+                    };
+                    let card = scan(&root, &cams, pick.as_deref());
                     let (mode, auto) = {
                         let mut g = h.lock().unwrap();
                         g.cards.push(card.clone());
@@ -207,10 +267,7 @@ pub fn spawn_watcher(h: Handle, ctx: eframe::egui::Context) {
                         (g.settings.notify, g.settings.auto_import)
                     };
                     if mode == Notify::Toast {
-                        let body = format!(
-                            "{root}  ·  {} JPG  ·  {} RAW  ·  {} VID",
-                            card.jpg, card.raw, card.vid
-                        );
+                        let body = format!("{root}  ·  {}  ·  {}", card.camera.name, card.summary());
                         let (h2, ctx2, root2) = (h.clone(), ctx.clone(), root.clone());
                         toast("SWORTA – Card detected", &body, Some("Import"), move |import| {
                             show_window(&h2, &ctx2);
@@ -219,13 +276,16 @@ pub fn spawn_watcher(h: Handle, ctx: eframe::egui::Context) {
                             }
                         });
                     }
-                    if auto {
-                        let dest = h.lock().unwrap().settings.dest.clone();
+                    // An unknown camera waits for the user instead of being sorted by guesswork.
+                    if auto && card.how != How::Unknown {
+                        let dest = card.camera.dest.clone().unwrap_or_else(|| h.lock().unwrap().settings.dest.clone());
                         start_import(&h, &ctx, &root, dest);
                     }
                     ctx.request_repaint();
                 } else if !present && known.remove(&l) {
-                    h.lock().unwrap().cards.retain(|c| c.root != root);
+                    let mut g = h.lock().unwrap();
+                    g.cards.retain(|c| c.root != root);
+                    g.picked.remove(&root);
                     ctx.request_repaint();
                 }
             }
@@ -303,9 +363,8 @@ pub fn start_import(h: &Handle, ctx: &eframe::egui::Context, root: &str, dest: P
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default();
                 }
-                let dt: DateTime<Local> = it.mtime.into();
-                let date = dt.format(if long_date { "%Y-%m-%d" } else { "%y%m%d" }).to_string();
-                let dir = dest.join(date).join(it.kind.dir());
+                let date = it.date.format(if long_date { "%Y-%m-%d" } else { "%y%m%d" }).to_string();
+                let dir = camera::target_dir(&dest, &card.camera.layout, &date, &it.ty, &card.camera.name);
 
                 let res = copy_one(it, &dir, &mut |n| {
                     let limit = {
@@ -447,15 +506,18 @@ fn write_file(it: &Item, target: &Path, on_bytes: &mut dyn FnMut(u64) -> bool) -
     fs::rename(&part, target)
 }
 
-/// Starts an import, asking for the destination first when that setting is on.
+/// Starts an import, asking for the destination first unless the camera or the settings fix it.
 pub fn begin_import(h: &Handle, ctx: &eframe::egui::Context, root: &str) {
     let (h, ctx, root) = (h.clone(), ctx.clone(), root.to_string());
     thread::spawn(move || {
-        let (ask, last) = {
+        let (ask, last, fixed) = {
             let g = h.lock().unwrap();
-            (g.settings.ask_dest, g.settings.dest.clone())
+            let fixed = g.cards.iter().find(|c| c.root == root).and_then(|c| c.camera.dest.clone());
+            (g.settings.ask_dest, g.settings.dest.clone(), fixed)
         };
-        let dest = if ask {
+        let dest = if let Some(d) = fixed {
+            d
+        } else if ask {
             let start = if last.exists() { last.clone() } else { last.parent().map(Path::to_path_buf).unwrap_or(last.clone()) };
             let picked = rfd::FileDialog::new()
                 .set_title(format!("Destination folder for {root}"))

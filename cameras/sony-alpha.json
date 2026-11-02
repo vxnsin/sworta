@@ -1,0 +1,17 @@
+{
+  "id": "sony-alpha",
+  "name": "Sony Alpha",
+  "models": ["ILCE-", "ILME-", "ZV-", "DSC-RX"],
+  "markers": ["PRIVATE/M4ROOT"],
+  "sources": ["DCIM", "PRIVATE/M4ROOT/CLIP"],
+  "types": {
+    "jpg": "JPG",
+    "jpeg": "JPG",
+    "hif": "HIF",
+    "arw": "RAW",
+    "mp4": "VID",
+    "xml": "VID"
+  },
+  "layout": "{date}/{type}",
+  "date_from_name": false
+}

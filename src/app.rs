@@ -4,7 +4,8 @@ use eframe::egui::{
     pos2, vec2,
 };
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
+    path::Path,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -14,6 +15,7 @@ use tray_icon::{
 };
 
 use crate::{
+    camera::{self, Camera, How},
     config::{self, Notify, Settings},
     dots,
     engine::{self, Card, Handle, Progress, Shared, State},
@@ -35,11 +37,120 @@ const DEMO: &str = "DEMO";
 const SPEEDS: [u32; 7] = [0, 10, 25, 50, 100, 200, 400];
 const PARALLEL: [u32; 4] = [1, 2, 3, 4];
 const POPUP_SECS: [u32; 4] = [5, 12, 30, 0];
+const LAYOUTS: [(&str, &str); 3] = [
+    ("DATE/TYPE", "{date}/{type}"),
+    ("CAMERA/DATE/TYPE", "{camera}/{date}/{type}"),
+    ("DATE", "{date}"),
+];
 
 #[derive(PartialEq, Clone, Copy)]
 enum Tab {
     Home,
+    Cameras,
     Settings,
+}
+
+/// A camera being set up or edited on the CAMERAS tab.
+struct Editor {
+    cam: Camera,
+    /// Id before editing; None for a new camera.
+    orig: Option<String>,
+    /// Card the editor was opened from; a new camera is remembered for it.
+    root: Option<String>,
+    /// Model name that card reported.
+    seen_model: Option<String>,
+    /// Files per extension on that card.
+    found: BTreeMap<String, usize>,
+    models: String,
+    markers: String,
+    sources: String,
+    new_ext: String,
+    custom_layout: bool,
+    error: Option<String>,
+}
+
+enum EdAction {
+    Save,
+    Cancel,
+    Export,
+    Delete,
+}
+
+fn guess_type(ext: &str) -> String {
+    match ext {
+        "jpg" | "jpeg" | "heic" | "hif" | "png" => "JPG".into(),
+        "arw" | "cr2" | "cr3" | "nef" | "raf" | "orf" | "rw2" | "dng" => "RAW".into(),
+        "mp4" | "mov" | "mts" | "avi" => "VID".into(),
+        "wav" | "mp3" | "m4a" => "AUDIO".into(),
+        // Proxies and thumbnails the cameras write next to the real files.
+        "lrf" | "lrv" | "thm" => String::new(),
+        _ => ext.to_uppercase(),
+    }
+}
+
+fn split_list(s: &str) -> Vec<String> {
+    s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()
+}
+
+impl Editor {
+    fn new(cam: Camera, orig: Option<String>, root: Option<String>, found: BTreeMap<String, usize>) -> Self {
+        let mut cam = cam;
+        for e in found.keys() {
+            cam.types.entry(e.clone()).or_insert_with(|| guess_type(e));
+        }
+        Self {
+            models: cam.models.join(", "),
+            markers: cam.markers.join(", "),
+            sources: cam.sources.join(", "),
+            custom_layout: !LAYOUTS.iter().any(|(_, l)| *l == cam.layout),
+            cam,
+            orig,
+            root,
+            seen_model: None,
+            found,
+            new_ext: String::new(),
+            error: None,
+        }
+    }
+
+    fn blank() -> Self {
+        let cam = Camera {
+            name: "New camera".into(),
+            sources: vec!["DCIM".into()],
+            layout: LAYOUTS[0].1.into(),
+            types: ["jpg", "mp4"].iter().map(|e| (e.to_string(), guess_type(e))).collect(),
+            ..Default::default()
+        };
+        Self::new(cam, None, None, BTreeMap::new())
+    }
+
+    fn from_card(card: &Card) -> Self {
+        let found = camera::survey(Path::new(&card.root), &card.camera.sources);
+        let mut ed = if card.how == How::Unknown {
+            // Start from what is on the card, not from the long default list.
+            let cam = Camera {
+                name: card.model.clone().unwrap_or_else(|| "New camera".into()),
+                models: card.model.iter().cloned().collect(),
+                sources: card.camera.sources.clone(),
+                layout: card.camera.layout.clone(),
+                ..Default::default()
+            };
+            Self::new(cam, None, Some(card.root.clone()), found)
+        } else {
+            Self::new(card.camera.clone(), Some(card.camera.id.clone()), Some(card.root.clone()), found)
+        };
+        ed.seen_model = card.model.clone();
+        ed
+    }
+
+    fn finished(&self) -> Camera {
+        let mut c = self.cam.clone();
+        c.name = c.name.trim().to_string();
+        c.models = split_list(&self.models);
+        c.markers = split_list(&self.markers);
+        c.sources = split_list(&self.sources);
+        c
+    }
 }
 
 #[derive(PartialEq, Clone)]
@@ -56,6 +167,9 @@ pub struct App {
     popup_since: Instant,
     done_seen: Option<Instant>,
     synced: bool,
+    editor: Option<Editor>,
+    /// Result of the last camera import, shown on the CAMERAS tab.
+    cam_msg: Option<String>,
     _tray: TrayIcon,
 }
 
@@ -63,6 +177,7 @@ struct Snap {
     cards: Vec<Card>,
     jobs: HashMap<String, Progress>,
     settings: Settings,
+    cameras: Vec<Camera>,
     update: Update,
 }
 
@@ -111,6 +226,8 @@ impl App {
             cards: Vec::new(),
             jobs: HashMap::new(),
             settings,
+            cameras: camera::load_all(),
+            picked: HashMap::new(),
             update: Default::default(),
             popup_request: None,
             want_full: false,
@@ -155,6 +272,8 @@ impl App {
             popup_since: Instant::now(),
             done_seen: None,
             synced: false,
+            editor: None,
+            cam_msg: None,
             _tray: tray,
         }
     }
@@ -216,8 +335,98 @@ impl App {
             cards: g.cards.clone(),
             jobs: g.jobs.clone(),
             settings: g.settings.clone(),
+            cameras: g.cameras.clone(),
             update: g.update.clone(),
         }
+    }
+
+    fn open_setup(&mut self, card: &Card) {
+        self.editor = Some(Editor::from_card(card));
+        self.tab = Tab::Cameras;
+    }
+
+    fn reload_cameras(&mut self, ctx: &egui::Context) {
+        self.h.lock().unwrap().cameras = camera::load_all();
+        engine::rescan_all(&self.h, ctx);
+    }
+
+    fn save_editor(&mut self, ctx: &egui::Context) {
+        let Some(ed) = self.editor.as_mut() else { return };
+        let mut cam = ed.finished();
+        if cam.name.is_empty() {
+            ed.error = Some("Give the camera a name.".into());
+            return;
+        }
+        if ed.orig.is_none() {
+            let cams = self.h.lock().unwrap().cameras.clone();
+            cam.id = camera::unique_id(&cam.name, &cams);
+        }
+        let cam = match camera::parse(&camera::to_json(&cam)) {
+            Ok(c) => c,
+            Err(e) => {
+                ed.error = Some(e);
+                return;
+            }
+        };
+        if let Err(e) = camera::save(&cam) {
+            ed.error = Some(format!("Could not save the camera ({e})."));
+            return;
+        }
+        // A new camera set up from a card belongs to that card, even without a model name to go by.
+        let pin = if ed.orig.is_none() { ed.root.clone() } else { None };
+        self.editor = None;
+        self.h.lock().unwrap().cameras = camera::load_all();
+        match pin {
+            Some(root) => engine::assign(&self.h, ctx, &root, &cam.id),
+            None => engine::rescan_all(&self.h, ctx),
+        }
+    }
+
+    fn delete_editor(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.editor.as_ref().and_then(|e| e.orig.clone()) else { return };
+        camera::remove(&id);
+        if !camera::is_builtin(&id) {
+            let mut g = self.h.lock().unwrap();
+            g.settings.cards.retain(|_, v| *v != id);
+            g.picked.retain(|_, v| *v != id);
+            config::save(&g.settings);
+        }
+        self.editor = None;
+        self.reload_cameras(ctx);
+    }
+
+    fn export_editor(&mut self) {
+        let Some(ed) = self.editor.as_mut() else { return };
+        let mut cam = ed.finished();
+        if cam.id.is_empty() {
+            cam.id = camera::slug(&cam.name);
+        }
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(format!("{}.json", cam.name))
+            .add_filter("SWORTA camera", &["json"])
+            .save_file()
+        else {
+            return;
+        };
+        ed.error = std::fs::write(&path, camera::to_json(&cam))
+            .err()
+            .map(|e| format!("Could not write the file ({e})."));
+    }
+
+    fn import_camera(&mut self, ctx: &egui::Context) {
+        let Some(path) = rfd::FileDialog::new().add_filter("SWORTA camera", &["json"]).pick_file() else {
+            return;
+        };
+        self.cam_msg = Some(match camera::read(&path) {
+            Ok(c) => match camera::save(&c) {
+                Ok(()) => {
+                    self.reload_cameras(ctx);
+                    format!("Added {}.", c.name)
+                }
+                Err(e) => format!("Could not save the camera ({e})."),
+            },
+            Err(e) => e,
+        });
     }
 }
 
@@ -412,12 +621,167 @@ fn fmt_eta(p: &Progress) -> String {
 fn demo_card() -> Card {
     Card {
         root: "E:\\".into(),
+        serial: None,
+        camera: camera::builtins().remove(0),
+        how: How::Model,
+        model: Some("ILCE-7M4".into()),
         items: Arc::new(Vec::new()),
-        jpg: 128,
-        raw: 128,
-        vid: 6,
+        counts: BTreeMap::from([("JPG".into(), 128), ("RAW".into(), 128), ("VID".into(), 6)]),
+        unsorted: BTreeMap::new(),
         bytes: 14_200_000_000,
     }
+}
+
+fn how_text(c: &Card) -> String {
+    match c.how {
+        How::Card => "picked for this card".into(),
+        How::Model => format!("model {}", c.model.as_deref().unwrap_or("?")),
+        How::Folders => "recognised by its folders".into(),
+        How::Unknown => "unknown camera".into(),
+    }
+}
+
+fn field(ui: &mut Ui, label: &str, v: &mut String) {
+    ui.label(RichText::new(label).color(MUTED).size(11.0));
+    ui.add(egui::TextEdit::singleline(v).desired_width(f32::INFINITY).font(FontId::monospace(12.0)));
+}
+
+fn note(ui: &mut Ui, text: impl Into<String>) {
+    ui.label(RichText::new(text.into()).color(MUTED).size(11.0));
+}
+
+fn editor_ui(ui: &mut Ui, ed: &mut Editor, s: &Settings) -> Option<EdAction> {
+    let mut act = None;
+    rule(ui, "01", if ed.orig.is_some() { "EDIT CAMERA" } else { "NEW CAMERA" });
+    field(ui, "Name", &mut ed.cam.name);
+    field(ui, "Model names, a part is enough", &mut ed.models);
+    if let Some(m) = &ed.seen_model {
+        note(ui, format!("This card says: {m}"));
+    }
+    field(ui, "Folders only this camera makes (DCIM/DJI_*)", &mut ed.markers);
+    field(ui, "Folders with photos and videos", &mut ed.sources);
+    ui.add_space(10.0);
+
+    rule(ui, "02", "FILES");
+    let keys: Vec<String> = ed.cam.types.keys().cloned().collect();
+    let mut remove = None;
+    for k in &keys {
+        ui.horizontal(|ui| {
+            ui.set_min_height(28.0);
+            ui.label(RichText::new(format!("{:<5}", k.to_uppercase())).size(12.0));
+            let n = ed.found.get(k).map(|n| format!("{n} on card")).unwrap_or_default();
+            ui.label(RichText::new(n).color(MUTED).size(11.0));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if btn(ui, "×", Btn::Ghost, true) {
+                    remove = Some(k.clone());
+                }
+                if let Some(v) = ed.cam.types.get_mut(k) {
+                    ui.add(
+                        egui::TextEdit::singleline(v)
+                            .hint_text("skip")
+                            .desired_width(110.0)
+                            .font(FontId::monospace(12.0)),
+                    );
+                }
+                ui.label(RichText::new("→").color(MUTED));
+            });
+        });
+    }
+    if let Some(k) = remove {
+        ed.cam.types.remove(&k);
+    }
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut ed.new_ext)
+                .hint_text("extension, e.g. wav")
+                .desired_width(170.0)
+                .font(FontId::monospace(12.0)),
+        );
+        let e = ed.new_ext.trim().trim_start_matches('.').to_lowercase();
+        if btn(ui, "ADD", Btn::Ghost, !e.is_empty()) {
+            ed.cam.types.entry(e.clone()).or_insert_with(|| guess_type(&e));
+            ed.new_ext.clear();
+        }
+    });
+    note(ui, "Folder per file type. Empty means the type is not imported.");
+    ui.add_space(10.0);
+
+    rule(ui, "03", "DESTINATION");
+    let labels: Vec<&str> = LAYOUTS.iter().map(|(n, _)| *n).chain(["CUSTOM"]).collect();
+    let mut li = if ed.custom_layout {
+        LAYOUTS.len()
+    } else {
+        LAYOUTS.iter().position(|(_, l)| *l == ed.cam.layout).unwrap_or(LAYOUTS.len())
+    };
+    if choice(ui, &mut li, &labels) {
+        ed.custom_layout = li == LAYOUTS.len();
+        if !ed.custom_layout {
+            ed.cam.layout = LAYOUTS[li].1.into();
+        }
+    }
+    if ed.custom_layout {
+        field(ui, "{date}, {type} and {camera}, folders split by /", &mut ed.cam.layout);
+    }
+    let mut di = ed.cam.date_from_name as usize;
+    row(ui, "Day taken from", |ui| {
+        choice(ui, &mut di, &["FILE TIME", "FILE NAME"]);
+    });
+    ed.cam.date_from_name = di == 1;
+
+    let mut fi = ed.cam.dest.is_some() as usize;
+    let mut fixed_changed = false;
+    row(ui, "Import folder", |ui| {
+        fixed_changed = choice(ui, &mut fi, &["SETTINGS", "FIXED"]);
+    });
+    if fixed_changed {
+        ed.cam.dest = if fi == 1 {
+            rfd::FileDialog::new().set_directory(&s.dest).pick_folder()
+        } else {
+            None
+        };
+    }
+    match &ed.cam.dest {
+        Some(d) => {
+            note(ui, format!("always {}", d.display()));
+            if btn(ui, "CHANGE FOLDER", Btn::Ghost, true) {
+                if let Some(p) = rfd::FileDialog::new().set_directory(d).pick_folder() {
+                    ed.cam.dest = Some(p);
+                }
+            }
+        }
+        None if s.ask_dest => note(ui, "asks on every import, like in Settings"),
+        None => note(ui, format!("{}, like in Settings", s.dest.display())),
+    }
+    let base = ed.cam.dest.clone().unwrap_or_else(|| s.dest.clone());
+    let date = chrono::Local::now().format(if s.long_date { "%Y-%m-%d" } else { "%y%m%d" }).to_string();
+    let ty = ed.cam.types.values().find(|v| !v.is_empty()).cloned().unwrap_or_default();
+    let example = camera::target_dir(&base, &ed.cam.layout, &date, &ty, ed.cam.name.trim());
+    ui.label(RichText::new(format!("→ {}\\…", example.display())).size(11.0));
+    ui.add_space(10.0);
+
+    if let Some(e) = &ed.error {
+        ui.label(RichText::new(e).color(RED).size(11.5));
+    }
+    ui.horizontal(|ui| {
+        if btn(ui, "SAVE", Btn::Primary, true) {
+            act = Some(EdAction::Save);
+        }
+        if btn(ui, "CANCEL", Btn::Ghost, true) {
+            act = Some(EdAction::Cancel);
+        }
+        if btn(ui, "EXPORT", Btn::Ghost, true) {
+            act = Some(EdAction::Export);
+        }
+        if let Some(id) = &ed.orig {
+            if camera::has_own_file(id) {
+                let label = if camera::is_builtin(id) { "RESET" } else { "DELETE" };
+                if btn(ui, label, Btn::Ghost, true) {
+                    act = Some(EdAction::Delete);
+                }
+            }
+        }
+    });
+    act
 }
 
 fn drive_label(root: &str) -> String {
@@ -532,7 +896,7 @@ impl App {
             });
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                for (t, name) in [(Tab::Home, "HOME"), (Tab::Settings, "SETTINGS")] {
+                for (t, name) in [(Tab::Home, "HOME"), (Tab::Cameras, "CAMERAS"), (Tab::Settings, "SETTINGS")] {
                     let on = self.tab == t;
                     let g = ui.painter().layout_no_wrap(
                         name.to_string(),
@@ -559,6 +923,7 @@ impl App {
                 ui.set_max_width(ui.available_width() - 14.0);
                 match self.tab {
                     Tab::Home => self.home(ui, ctx, snap),
+                    Tab::Cameras => self.cameras(ui, ctx, snap),
                     Tab::Settings => self.settings(ui, ctx, snap),
                 }
             });
@@ -624,7 +989,11 @@ impl App {
                     ui.add_space(4.0);
                     match card {
                         Some(c) => {
-                            ui.label(RichText::new(format!("JPG {}   RAW {}   VID {}", c.jpg, c.raw, c.vid)).size(12.0));
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(&c.camera.name).size(12.0));
+                                ui.label(RichText::new(how_text(c)).color(MUTED).size(11.0));
+                            });
+                            ui.label(RichText::new(c.summary()).size(12.0));
                             ui.label(RichText::new(fmt_bytes(c.bytes)).color(MUTED).size(12.0));
                         }
                         None => {
@@ -635,8 +1004,35 @@ impl App {
             });
             let running = job.is_some_and(|p| p.state == State::Running);
             if let (Some(c), false) = (card, job.is_some()) {
-                if btn(ui, "IMPORT", Btn::Primary, !c.items.is_empty()) {
-                    engine::begin_import(&self.h, ctx, &root);
+                if c.how == How::Unknown {
+                    ui.label(RichText::new("Not set up yet, sorted by the default rules. Set it up once and SWORTA knows it next time.").color(RED).size(11.5));
+                } else if !c.unsorted.is_empty() {
+                    ui.label(RichText::new(format!("Not imported, no folder set: {}", c.unsorted_line())).color(RED).size(11.5));
+                }
+                ui.horizontal(|ui| {
+                    if btn(ui, "IMPORT", Btn::Primary, !c.items.is_empty()) {
+                        engine::begin_import(&self.h, ctx, &root);
+                    }
+                    let label = if c.needs_setup() { "SET UP" } else { "EDIT CAMERA" };
+                    if btn(ui, label, Btn::Ghost, true) {
+                        self.open_setup(c);
+                    }
+                });
+                let mut pick = None;
+                row(ui, "Camera", |ui| {
+                    egui::ComboBox::from_id_salt(("camera", root.as_str()))
+                        .selected_text(RichText::new(&c.camera.name).size(12.0))
+                        .width(180.0)
+                        .show_ui(ui, |ui| {
+                            for cam in &snap.cameras {
+                                if ui.selectable_label(cam.id == c.camera.id, &cam.name).clicked() {
+                                    pick = Some(cam.id.clone());
+                                }
+                            }
+                        });
+                });
+                if let Some(id) = pick {
+                    engine::assign(&self.h, ctx, &root, &id);
                 }
             }
             if let Some(p) = job {
@@ -686,6 +1082,74 @@ impl App {
                 }
             });
         }
+    }
+
+    fn cameras(&mut self, ui: &mut Ui, ctx: &egui::Context, snap: &Snap) {
+        if let Some(ed) = self.editor.as_mut() {
+            match editor_ui(ui, ed, &snap.settings) {
+                Some(EdAction::Save) => self.save_editor(ctx),
+                Some(EdAction::Cancel) => self.editor = None,
+                Some(EdAction::Export) => self.export_editor(),
+                Some(EdAction::Delete) => self.delete_editor(ctx),
+                None => {}
+            }
+            return;
+        }
+
+        rule(ui, "01", "CAMERAS");
+        let mut edit = None;
+        for cam in &snap.cameras {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(&cam.name).size(12.0));
+                    let how = if cam.id == camera::FALLBACK {
+                        "used when no other camera matches".to_string()
+                    } else {
+                        let mut parts = Vec::new();
+                        if !cam.models.is_empty() {
+                            parts.push(format!("model {}", cam.models.join(", ")));
+                        }
+                        if !cam.markers.is_empty() {
+                            parts.push(format!("folders {}", cam.markers.join(", ")));
+                        }
+                        if parts.is_empty() { "only cards picked by hand".into() } else { parts.join(" · ") }
+                    };
+                    note(ui, how);
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if btn(ui, "EDIT", Btn::Ghost, true) {
+                        edit = Some(cam.clone());
+                    }
+                });
+            });
+        }
+        if let Some(cam) = edit {
+            let card = snap.cards.iter().find(|c| c.camera.id == cam.id);
+            let found = card.map(|c| camera::survey(Path::new(&c.root), &cam.sources)).unwrap_or_default();
+            self.editor = Some(Editor::new(cam.clone(), Some(cam.id.clone()), None, found));
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if btn(ui, "NEW CAMERA", Btn::Ghost, true) {
+                self.editor = Some(Editor::blank());
+            }
+            if btn(ui, "IMPORT FILE", Btn::Ghost, true) {
+                self.import_camera(ctx);
+            }
+        });
+        if let Some(m) = &self.cam_msg {
+            note(ui, m.clone());
+        }
+        ui.add_space(10.0);
+
+        rule(ui, "02", "HOW CARDS ARE MATCHED");
+        note(
+            ui,
+            "SWORTA reads the camera model from the photos and clips on the card, then looks at its folders. \
+             A camera you pick for a card by hand is remembered until the card is formatted. \
+             The camera never needs to be connected, the card is enough.",
+        );
     }
 
     fn settings(&mut self, ui: &mut Ui, ctx: &egui::Context, snap: &Snap) {
@@ -874,8 +1338,9 @@ impl App {
                 ui.add_space(4.0);
                 ui.vertical(|ui| {
                     if let Some(c) = &card {
-                        ui.label(RichText::new(format!("JPG {}  RAW {}  VID {}", c.jpg, c.raw, c.vid)).size(12.0));
-                        ui.label(RichText::new(fmt_bytes(c.bytes)).color(MUTED).size(11.5));
+                        let name = if c.how == How::Unknown { "Unknown camera" } else { &c.camera.name };
+                        ui.label(RichText::new(name).size(12.0));
+                        ui.label(RichText::new(format!("{}  ·  {}", c.summary(), fmt_bytes(c.bytes))).color(MUTED).size(11.5));
                     }
                 });
             });
@@ -899,7 +1364,11 @@ impl App {
                     if btn(ui, "IMPORT", Btn::Primary, can) {
                         engine::begin_import(&self.h, ctx, &key);
                     }
-                    if btn(ui, "OPEN", Btn::Ghost, true) {
+                    let setup = !demo && card.as_ref().is_some_and(|c| c.needs_setup());
+                    if btn(ui, if setup { "SET UP" } else { "OPEN" }, Btn::Ghost, true) {
+                        if let (true, Some(c)) = (setup, &card) {
+                            self.open_setup(c);
+                        }
                         self.enter_full(ctx);
                     }
                 });

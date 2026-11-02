@@ -1,0 +1,16 @@
+{
+  "id": "dji-action",
+  "name": "DJI Osmo Action",
+  "models": ["OsmoAction", "Osmo Action"],
+  "markers": ["DCIM/DJI_*"],
+  "sources": ["DCIM"],
+  "types": {
+    "mp4": "VID",
+    "mov": "VID",
+    "jpg": "JPG",
+    "dng": "RAW",
+    "lrf": ""
+  },
+  "layout": "{date}/{type}",
+  "date_from_name": true
+}

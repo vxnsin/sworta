@@ -8,7 +8,7 @@ Built for Sony cameras (Alpha series), where photos sit in `DCIM` subfolders and
 
 ## What it does
 
-Everything ends up in one folder per shooting day, split by type:
+By default everything ends up in one folder per shooting day, split by type:
 
 ```
 Destination/
@@ -18,9 +18,9 @@ Destination/
     └── VID/    .MP4 and .XML from PRIVATE/M4ROOT/CLIP
 ```
 
-The folder name is the capture date (`YYMMDD` or `YYYY-MM-DD`), taken from the file's modified time. A shoot that spans two days lands in two folders.
+The folder name is the capture date (`YYMMDD` or `YYYY-MM-DD`), taken from the file's modified time or, for cameras that put it there, from the file name. A shoot that spans two days lands in two folders.
 
-- Detects SD cards and USB drives that contain a `DCIM` folder
+- Detects SD cards and USB drives that contain a `DCIM` folder or the folders of a known camera
 - Asks for the destination folder on every import, because every shoot goes somewhere else (can be switched to a fixed folder)
 - Imports can be cancelled at any time; files already copied stay, the half-written one is removed
 - Several cards can import at the same time, and several files per card are copied in parallel
@@ -29,6 +29,16 @@ The folder name is the capture date (`YYMMDD` or `YYYY-MM-DD`), taken from the f
 - Same name but a different file gets a `_1` suffix instead of being overwritten
 - Original modified times are kept
 - Nothing is ever deleted from the card
+
+## Cameras
+
+SWORTA does not need the camera, only the card. It reads the model name from the first photo or clip, and if there is none it goes by the folders the camera left behind. Sony Alpha and DJI Osmo Action are set up out of the box, anything else is sorted by sensible defaults until you set it up.
+
+Setting up a camera happens on the card itself: plug it in, click **Set up**, and SWORTA lists what it found (`MP4 12 · LRF 12 · JPG 30`). You pick a folder for each file type or leave it empty to skip it, choose how the folders are laid out (`date/type`, `camera/date/type`, …) and optionally a fixed import folder for that camera. If a camera later writes a file type it has no folder for yet, the card says so instead of quietly leaving the files behind.
+
+Two cameras of the same brand can each get their own setup, the more specific model name wins (`ILCE-7M4` over `ILCE-`). If SWORTA cannot tell a card apart at all, pick the camera from the list on the card. That choice is remembered for the card until it gets formatted.
+
+Each camera is a small JSON file. **Export** on the camera page writes it out, **Import file** on another machine adds it, so a colleague can hand you their setup. The built-in ones live in [`cameras/`](cameras), and a pull request with a new file is the easiest way to add one for everybody.
 
 ## Notifications
 
@@ -59,7 +69,7 @@ Both variants update themselves the same way, see below.
 - **Notifications**: popup, Windows toast or off, and how long the popup stays
 - **System**: start with Windows (runs hidden in the tray), automatic updates
 
-Settings live in `%APPDATA%\SWORTA\settings.json`.
+Settings live in `%APPDATA%\SWORTA\settings.json`, your cameras in `%APPDATA%\SWORTA\cameras\`.
 
 ## Updates
 
