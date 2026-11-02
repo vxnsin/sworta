@@ -1227,7 +1227,10 @@ impl App {
                 });
             });
             let running = job.is_some_and(|p| p.state == State::Running);
-            if let (Some(c), false) = (card, job.is_some()) {
+            // While a device is still being opened or read there is nothing to set up yet.
+            if let (Some(c), false) = (card, job.is_some())
+                && !(c.device && c.hint.is_some() && !c.locked)
+            {
                 if let (How::Unknown, Some(s)) = (c.how, &c.suggest) {
                     ui.label(RichText::new(format!("Looks like {}. Add it from the library and SWORTA sorts this card the right way.", s.name)).color(RED).size(11.5));
                 } else if c.how == How::Unknown {

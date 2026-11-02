@@ -13,6 +13,12 @@ use eframe::egui;
 use std::{process::Command, thread, time::Duration};
 
 fn main() -> eframe::Result {
+    // Background threads die quietly in a GUI app; leave a trace of why.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        engine::log(&format!("panic: {info}"));
+        default_hook(info);
+    }));
     let args: Vec<String> = std::env::args().collect();
     let hidden = args.iter().any(|a| a == "--tray");
     let after_update = args.iter().any(|a| a == "--after-update");

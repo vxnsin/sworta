@@ -265,13 +265,25 @@ fn read_device(h: &Handle, ctx: &eframe::egui::Context, key: String, name: Strin
     let (h, ctx) = (h.clone(), ctx.clone());
     thread::spawn(move || {
         device::init();
+        log(&format!("device {name:?}: reading (fresh: {fresh})"));
         let (cams, lib, pick, old) = {
             let g = h.lock().unwrap();
             let (cams, lib) = camera_lists(&g);
             let old = g.cards.iter().find(|c| c.root == key).map(|c| (c.locked, c.camera.sources.clone(), c.listed.clone()));
             (cams, lib, picked_for(&g, &key, Some(&key)), old)
         };
+        // Opening a busy phone can take a while; show it right away.
+        if fresh {
+            let fallback = cams.iter().find(|c| c.id == camera::FALLBACK).cloned().unwrap_or_default();
+            let mut c = card_from(&key, fallback, How::Unknown, None, Vec::new(), BTreeMap::new(), None);
+            c.title = name.clone();
+            c.device = true;
+            c.hint = Some(format!("Opening {name} …"));
+            h.lock().unwrap().cards.push(c);
+            ctx.request_repaint();
+        }
         let opened = device::Opened::new(&key);
+        log(&format!("device {name:?}: opened {}", if opened.as_ref().is_some_and(|o| !o.is_empty()) { "with storage" } else { "without storage" }));
         let has = |p: &str| opened.as_ref().is_some_and(|o| o.has_path(p));
         let found = camera::detect_device(&name, &has, &cams, pick.as_deref());
         let cam = found.camera.clone();
@@ -282,9 +294,18 @@ fn read_device(h: &Handle, ctx: &eframe::egui::Context, key: String, name: Strin
             None
         };
         let locked = opened.as_ref().is_none_or(|o| o.is_empty());
+        log(&format!(
+            "device {name:?}: camera {} ({:?}), library {:?}, locked {locked}",
+            cam.id,
+            found.how,
+            suggest.as_ref().map(|s| &s.id)
+        ));
         // Players, e-readers and the like are no camera and stay out of the list.
         if fresh && found.how == How::Unknown && suggest.is_none() && !locked && !has("DCIM") {
-            h.lock().unwrap().reading.remove(&key);
+            let mut g = h.lock().unwrap();
+            g.cards.retain(|c| c.root != key);
+            g.reading.remove(&key);
+            ctx.request_repaint();
             return;
         }
         let was_locked = old.as_ref().is_some_and(|(l, _, _)| *l);
@@ -310,6 +331,7 @@ fn read_device(h: &Handle, ctx: &eframe::egui::Context, key: String, name: Strin
             make(None, Some(format!("Reading {name} …")))
         };
         if fresh {
+            h.lock().unwrap().cards.retain(|c| c.root != key);
             arrived(&h, &ctx, first);
         } else {
             put(&h, &ctx, first);
@@ -337,6 +359,16 @@ fn read_device(h: &Handle, ctx: &eframe::egui::Context, key: String, name: Strin
                     }
                 });
             }
+            // Unplugged while reading: a half list would look like a finished one.
+            if opened.as_ref().is_some_and(|o| o.is_gone()) {
+                log(&format!("device {name:?}: stopped answering after {} files", listed.len()));
+                let mut g = h.lock().unwrap();
+                g.cards.retain(|c| c.root != key);
+                g.reading.remove(&key);
+                ctx.request_repaint();
+                return;
+            }
+            log(&format!("device {name:?}: listed {} files", listed.len()));
             let card = make(Some(Arc::new(listed)), None);
             put(&h, &ctx, card.clone());
             if fresh || was_locked {
@@ -351,6 +383,16 @@ fn read_device(h: &Handle, ctx: &eframe::egui::Context, key: String, name: Strin
         }
         h.lock().unwrap().reading.remove(&key);
     });
+}
+
+/// Appends a line to `%APPDATA%\SWORTA\sworta.log`.
+pub fn log(msg: &str) {
+    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
+    let dir = PathBuf::from(base).join("SWORTA");
+    let _ = fs::create_dir_all(&dir);
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(dir.join("sworta.log")) {
+        let _ = writeln!(f, "{} {msg}", chrono::Local::now().format("%F %T"));
+    }
 }
 
 /// Counts what is on a card or a listed device, for the camera editor.
@@ -520,6 +562,7 @@ pub fn spawn_watcher(h: Handle, ctx: eframe::egui::Context) {
             let devices = device::list();
             for d in &devices {
                 if known_dev.insert(d.key.clone()) {
+                    log(&format!("device {:?} plugged in", d.name));
                     read_device(&h, &ctx, d.key.clone(), d.name.clone(), true);
                 } else if h.lock().unwrap().cards.iter().any(|c| c.root == d.key && c.locked) {
                     // Looked at again until the phone is unlocked.
@@ -630,6 +673,13 @@ pub fn start_import(h: &Handle, ctx: &eframe::egui::Context, root: &str, dest: P
                             p.bytes_done += it.size;
                         }
                         Err(_) if cancel.load(Ordering::SeqCst) => {}
+                        // A file a device cannot hand out almost always means it was unplugged;
+                        // trying the rest would only wait for every single one.
+                        Err(e) if card.device => {
+                            p.failed += 1;
+                            cancel.store(true, Ordering::SeqCst);
+                            log(&format!("device {:?}: import stopped, {e}", card.title));
+                        }
                         Err(_) => p.failed += 1,
                     }
                 }
