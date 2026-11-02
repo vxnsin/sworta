@@ -59,8 +59,8 @@ struct Editor {
     root: Option<String>,
     /// Model name that card reported.
     seen_model: Option<String>,
-    /// Files per extension on that card.
-    found: BTreeMap<String, usize>,
+    /// What is on that card.
+    found: camera::Survey,
     models: String,
     markers: String,
     sources: String,
@@ -93,9 +93,9 @@ fn split_list(s: &str) -> Vec<String> {
 }
 
 impl Editor {
-    fn new(cam: Camera, orig: Option<String>, root: Option<String>, found: BTreeMap<String, usize>) -> Self {
+    fn new(cam: Camera, orig: Option<String>, root: Option<String>, found: camera::Survey) -> Self {
         let mut cam = cam;
-        for e in found.keys() {
+        for e in found.exts.keys() {
             cam.types.entry(e.clone()).or_insert_with(|| guess_type(e));
         }
         Self {
@@ -121,11 +121,11 @@ impl Editor {
             types: ["jpg", "mp4"].iter().map(|e| (e.to_string(), guess_type(e))).collect(),
             ..Default::default()
         };
-        Self::new(cam, None, None, BTreeMap::new())
+        Self::new(cam, None, None, camera::Survey::default())
     }
 
     fn from_card(card: &Card) -> Self {
-        let found = camera::survey(Path::new(&card.root), &card.camera.sources);
+        let found = camera::survey(Path::new(&card.root), &card.camera);
         let mut ed = if card.how == How::Unknown {
             // Start from what is on the card, not from the long default list.
             let cam = Camera {
@@ -149,6 +149,8 @@ impl Editor {
         c.models = split_list(&self.models);
         c.markers = split_list(&self.markers);
         c.sources = split_list(&self.sources);
+        let sources = c.sources.clone();
+        c.folders.retain(|k, v| sources.contains(k) && !v.trim().is_empty());
         c
     }
 }
@@ -663,13 +665,34 @@ fn editor_ui(ui: &mut Ui, ed: &mut Editor, s: &Settings) -> Option<EdAction> {
     ui.add_space(10.0);
 
     rule(ui, "02", "FILES");
+    note(ui, "Card folders: a folder name here takes everything in that folder, like proxies.");
+    for src in split_list(&ed.sources) {
+        ui.horizontal(|ui| {
+            ui.set_min_height(28.0);
+            ui.label(RichText::new(&src).size(11.5));
+            let n = ed.found.folders.get(&src).map(|n| format!("{n}")).unwrap_or_default();
+            ui.label(RichText::new(n).color(MUTED).size(11.0));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let v = ed.cam.folders.entry(src.clone()).or_default();
+                ui.add(
+                    egui::TextEdit::singleline(v)
+                        .hint_text("by file type")
+                        .desired_width(110.0)
+                        .font(FontId::monospace(12.0)),
+                );
+                ui.label(RichText::new("→").color(MUTED));
+            });
+        });
+    }
+    ui.add_space(6.0);
+    note(ui, "File types everywhere else:");
     let keys: Vec<String> = ed.cam.types.keys().cloned().collect();
     let mut remove = None;
     for k in &keys {
         ui.horizontal(|ui| {
             ui.set_min_height(28.0);
             ui.label(RichText::new(format!("{:<5}", k.to_uppercase())).size(12.0));
-            let n = ed.found.get(k).map(|n| format!("{n} on card")).unwrap_or_default();
+            let n = ed.found.exts.get(k).map(|n| format!("{n} on card")).unwrap_or_default();
             ui.label(RichText::new(n).color(MUTED).size(11.0));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if btn(ui, "×", Btn::Ghost, true) {
@@ -1126,7 +1149,7 @@ impl App {
         }
         if let Some(cam) = edit {
             let card = snap.cards.iter().find(|c| c.camera.id == cam.id);
-            let found = card.map(|c| camera::survey(Path::new(&c.root), &cam.sources)).unwrap_or_default();
+            let found = card.map(|c| camera::survey(Path::new(&c.root), &cam)).unwrap_or_default();
             self.editor = Some(Editor::new(cam.clone(), Some(cam.id.clone()), None, found));
         }
         ui.add_space(8.0);

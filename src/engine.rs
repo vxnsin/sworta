@@ -135,14 +135,14 @@ fn scan(root: &str, cameras: &[Camera], pick: Option<&str>) -> Card {
 
     let mut items = Vec::new();
     let mut unsorted = BTreeMap::new();
-    camera::walk_media(base, &cam.sources, &mut |p, md, ext| match cam.types.get(ext) {
+    camera::walk_media(base, &cam.sources, &mut |p, md, ext, src| match camera::type_for(&cam, src, ext) {
         None => *unsorted.entry(ext.to_string()).or_insert(0) += 1,
-        Some(ty) if ty.is_empty() => {}
+        Some("") => {}
         Some(ty) => {
             let Ok(mtime) = md.modified() else { return };
             items.push(Item {
                 src: p.to_path_buf(),
-                ty: ty.clone(),
+                ty: ty.to_string(),
                 date: camera::shoot_date(&cam, p, mtime),
                 mtime,
                 size: md.len(),

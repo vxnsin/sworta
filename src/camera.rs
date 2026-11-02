@@ -32,6 +32,8 @@ pub struct Camera {
     pub sources: Vec<String>,
     /// Lowercase extension → subfolder at the destination, empty = skip.
     pub types: BTreeMap<String, String>,
+    /// Card folder → subfolder for everything in it, ahead of `types` (Sony proxies in PRIVATE/M4ROOT/SUB are MP4 too).
+    pub folders: BTreeMap<String, String>,
     /// Path below the import folder with `{date}`, `{type}` and `{camera}`.
     pub layout: String,
     /// Take the shooting day from the file name (DJI_20261102143000_0001_D.MP4) instead of the file time.
@@ -109,6 +111,12 @@ pub fn parse(text: &str) -> Result<Camera, String> {
         .into_iter()
         .map(|(k, v)| (k.trim().trim_start_matches('.').to_lowercase(), v.trim().to_string()))
         .filter(|(k, _)| !k.is_empty())
+        .collect();
+    c.folders = c
+        .folders
+        .into_iter()
+        .map(|(k, v)| (k.trim().trim_matches(['/', '\\']).to_string(), v.trim().to_string()))
+        .filter(|(k, v)| !k.is_empty() && !v.is_empty())
         .collect();
     clean_list(&mut c.models);
     clean_list(&mut c.markers);
@@ -363,24 +371,42 @@ fn walk(dir: &Path, f: &mut dyn FnMut(&Path, &fs::Metadata)) {
     }
 }
 
-/// Every media file in the camera's folders, with its extension.
-pub fn walk_media(root: &Path, sources: &[String], f: &mut dyn FnMut(&Path, &fs::Metadata, &str)) {
+/// Every media file in the camera's folders, with its extension and the folder it came from.
+pub fn walk_media(root: &Path, sources: &[String], f: &mut dyn FnMut(&Path, &fs::Metadata, &str, &str)) {
     for src in sources {
         let mut dir = root.to_path_buf();
         dir.extend(segments(src));
         walk(&dir, &mut |p, md| {
             let e = ext(p);
             if !e.is_empty() {
-                f(p, md, &e);
+                f(p, md, &e, src);
             }
         });
     }
 }
 
-/// File count per extension in the given folders.
-pub fn survey(root: &Path, sources: &[String]) -> BTreeMap<String, usize> {
-    let mut out = BTreeMap::new();
-    walk_media(root, sources, &mut |_, _, e| *out.entry(e.to_string()).or_insert(0) += 1);
+/// Destination subfolder for one file: None = no rule yet, Some("") = skip.
+pub fn type_for<'a>(c: &'a Camera, src: &str, ext: &str) -> Option<&'a str> {
+    c.folders.get(src).or_else(|| c.types.get(ext)).map(String::as_str)
+}
+
+#[derive(Default)]
+pub struct Survey {
+    /// Files per extension, outside folders that have their own target.
+    pub exts: BTreeMap<String, usize>,
+    /// Files per card folder.
+    pub folders: BTreeMap<String, usize>,
+}
+
+/// What is on a card, for the camera editor.
+pub fn survey(root: &Path, c: &Camera) -> Survey {
+    let mut out = Survey::default();
+    walk_media(root, &c.sources, &mut |_, _, e, src| {
+        *out.folders.entry(src.to_string()).or_insert(0) += 1;
+        if !c.folders.contains_key(src) {
+            *out.exts.entry(e.to_string()).or_insert(0) += 1;
+        }
+    });
     out
 }
 
@@ -528,9 +554,29 @@ mod tests {
     #[test]
     fn survey_counts_and_hides_dotfiles() {
         let card = TempCard::new(&["DCIM/a/1.MP4", "DCIM/a/1.LRF", "DCIM/a/2.MP4", "DCIM/a/._2.MP4"]);
-        let s = survey(&card.0, &["DCIM".into()]);
-        assert_eq!(s.get("mp4"), Some(&2));
-        assert_eq!(s.get("lrf"), Some(&1));
+        let cam = Camera { sources: vec!["DCIM".into()], ..Default::default() };
+        let s = survey(&card.0, &cam);
+        assert_eq!(s.exts.get("mp4"), Some(&2));
+        assert_eq!(s.exts.get("lrf"), Some(&1));
+        assert_eq!(s.folders.get("DCIM"), Some(&3));
+    }
+
+    #[test]
+    fn sony_proxies_go_to_their_own_folder() {
+        let card = TempCard::new(&["PRIVATE/M4ROOT/CLIP/C0001.MP4", "PRIVATE/M4ROOT/SUB/C0001S03.MP4"]);
+        let sony = builtins().remove(0);
+        let mut got = Vec::new();
+        walk_media(&card.0, &sony.sources, &mut |p, _, e, src| {
+            got.push((p.file_name().unwrap().to_string_lossy().into_owned(), type_for(&sony, src, e).map(str::to_string)));
+        });
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("C0001.MP4".to_string(), Some("VID".to_string())),
+                ("C0001S03.MP4".to_string(), Some("PROXY".to_string())),
+            ]
+        );
     }
 
     #[test]
