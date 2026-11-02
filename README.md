@@ -2,7 +2,7 @@
 
 A small Windows tray app that sorts your camera card for you. Plug in the card, pick a folder, click import, done.
 
-Built for Sony cameras (Alpha series), where photos sit in `DCIM` subfolders and video clips hide in `PRIVATE/M4ROOT/CLIP`. SWORTA stays quiet in the tray and only speaks up when a card or USB drive with a `DCIM` folder shows up.
+Every camera lays out its card differently. A Sony hides video clips in `PRIVATE/M4ROOT/CLIP`, a DJI Osmo Action writes low-res proxies next to every clip. SWORTA works out which camera a card comes from and sorts it the way you set that camera up. It stays quiet in the tray and only speaks up when a camera card shows up.
 
 ![Home](docs/home.png)
 
