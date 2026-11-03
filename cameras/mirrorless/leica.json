@@ -1,0 +1,15 @@
+{
+  "id": "leica",
+  "name": "Leica",
+  "models": ["LEICA"],
+  "markers": ["DCIM/*LEICA"],
+  "sources": ["DCIM"],
+  "types": {
+    "jpg": "JPG",
+    "dng": "RAW",
+    "mp4": "VID",
+    "mov": "VID"
+  },
+  "layout": "{date}/{type}",
+  "date_from_name": false
+}

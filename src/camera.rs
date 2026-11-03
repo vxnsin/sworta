@@ -328,17 +328,23 @@ pub fn detect<'a>(root: &Path, cameras: &'a [Camera], remembered: Option<&str>) 
         }
     }
 
-    let by_folder = cameras
-        .iter()
-        .filter_map(|c| {
-            let hits = c.markers.iter().filter(|m| has_path(root, m)).count();
-            (hits > 0).then_some((c, hits))
-        })
-        .max_by_key(|(_, hits)| *hits);
-    match by_folder {
-        Some((c, _)) => Found { camera: c, how: How::Folders, model },
+    match by_folders(cameras, &|m| has_path(root, m)) {
+        Some(c) => Found { camera: c, how: How::Folders, model },
         None => Found { camera: fallback, how: How::Unknown, model },
     }
+}
+
+/// The camera whose folders fit best: the most markers found, and on a tie the one with none
+/// missing. A GoPro MAX card has `DCIM/100GOPRO` like a HERO, but only the MAX also expects `.360` files.
+fn by_folders<'a>(cameras: &'a [Camera], has: &dyn Fn(&str) -> bool) -> Option<&'a Camera> {
+    cameras
+        .iter()
+        .filter_map(|c| {
+            let hits = c.markers.iter().filter(|m| has(m)).count();
+            (hits > 0).then_some((c, hits, std::cmp::Reverse(c.markers.len() - hits)))
+        })
+        .max_by_key(|(_, hits, missing)| (*hits, *missing))
+        .map(|(c, _, _)| c)
 }
 
 /// Picks the camera for a device plugged in by cable: remembered device, then its name, then its folders.
@@ -366,15 +372,8 @@ pub fn detect_device<'a>(
     if let Some((c, _)) = by_name {
         return Found { camera: c, how: How::Model, model };
     }
-    let by_folder = cameras
-        .iter()
-        .filter_map(|c| {
-            let hits = c.markers.iter().filter(|m| has_path(m)).count();
-            (hits > 0).then_some((c, hits))
-        })
-        .max_by_key(|(_, hits)| *hits);
-    match by_folder {
-        Some((c, _)) => Found { camera: c, how: How::Folders, model },
+    match by_folders(cameras, has_path) {
+        Some(c) => Found { camera: c, how: How::Folders, model },
         None => Found { camera: fallback, how: How::Unknown, model },
     }
 }
@@ -609,7 +608,13 @@ mod tests {
         let all = cams();
         for (_, _, c) in library().iter().filter(|(_, _, c)| !c.markers.is_empty()) {
             let paths: Vec<String> = c.markers.iter().map(|m| m.replace('*', "100")).collect();
-            let card = TempCard::new(&paths.iter().map(String::as_str).collect::<Vec<_>>());
+            // `DCIM/DJI_100` is a folder when `DCIM/DJI_100/100.OSV` is a marker too.
+            let leaves: Vec<&str> = paths
+                .iter()
+                .filter(|p| !paths.iter().any(|q| q.starts_with(&format!("{p}/"))))
+                .map(String::as_str)
+                .collect();
+            let card = TempCard::new(&leaves);
             let f = detect(&card.0, &all, None);
             assert_eq!((f.camera.id.as_str(), f.how), (c.id.as_str(), How::Folders), "card for {}", c.id);
         }
@@ -617,7 +622,7 @@ mod tests {
 
     #[test]
     fn unknown_card_uses_fallback() {
-        let card = TempCard::new(&["DCIM/100OLYMP/P1010001.ORF"]);
+        let card = TempCard::new(&["DCIM/100KODAK/DCP_0001.KDC"]);
         let cams = cams();
         let f = detect(&card.0, &cams, None);
         assert_eq!(f.camera.id, FALLBACK);
@@ -649,6 +654,21 @@ mod tests {
         assert_eq!((pixel.camera.id.as_str(), pixel.how), ("android", How::Folders));
         let kindle = detect_device("Kindle", &|_| false, &cams, None);
         assert_eq!(kindle.how, How::Unknown);
+    }
+
+    #[test]
+    fn close_relatives_are_told_apart() {
+        let cams = cams();
+        let pick = |files: &[&str]| {
+            let card = TempCard::new(files);
+            detect(&card.0, &cams, None).camera.id.clone()
+        };
+        assert_eq!(pick(&["DCIM/100GOPRO/GX010001.MP4"]), "gopro-hero");
+        assert_eq!(pick(&["DCIM/100GOPRO/GS010001.360"]), "gopro-max");
+        assert_eq!(pick(&["DCIM/DJI_001/DJI_20261102143000_0001_D.MP4"]), "dji-action");
+        assert_eq!(pick(&["DCIM/DJI_001/DJI_20261102143000_0001_D.OSV"]), "dji-osmo-360");
+        assert_eq!(pick(&["DCIM/Camera01/VID_20261102_143000_00_001.insv"]), "insta360");
+        assert_eq!(pick(&["DCIM/Camera/PXL_20261102_143000.jpg"]), "android");
     }
 
     #[test]

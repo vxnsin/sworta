@@ -1,0 +1,17 @@
+{
+  "id": "gopro-max",
+  "name": "GoPro MAX",
+  "models": ["GoPro MAX"],
+  "markers": ["DCIM/*GOPRO", "DCIM/*GOPRO/*.360"],
+  "sources": ["DCIM"],
+  "types": {
+    "360": "VID",
+    "mp4": "VID",
+    "jpg": "JPG",
+    "gpr": "RAW",
+    "lrv": "",
+    "thm": ""
+  },
+  "layout": "{date}/{type}",
+  "date_from_name": false
+}

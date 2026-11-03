@@ -1,0 +1,17 @@
+{
+  "id": "om-system",
+  "name": "OM System / Olympus",
+  "models": ["OM Digital", "OLYMPUS"],
+  "markers": ["DCIM/*OMSYS", "DCIM/*OLYMP"],
+  "sources": ["DCIM"],
+  "types": {
+    "jpg": "JPG",
+    "orf": "RAW",
+    "ori": "RAW",
+    "mov": "VID",
+    "mp4": "VID",
+    "wav": "AUDIO"
+  },
+  "layout": "{date}/{type}",
+  "date_from_name": false
+}

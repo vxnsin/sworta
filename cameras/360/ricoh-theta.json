@@ -1,0 +1,14 @@
+{
+  "id": "ricoh-theta",
+  "name": "Ricoh Theta",
+  "models": ["RICOH THETA"],
+  "markers": [],
+  "sources": ["DCIM"],
+  "types": {
+    "jpg": "JPG",
+    "dng": "RAW",
+    "mp4": "VID"
+  },
+  "layout": "{date}/{type}",
+  "date_from_name": false
+}

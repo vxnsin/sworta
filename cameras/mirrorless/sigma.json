@@ -1,0 +1,16 @@
+{
+  "id": "sigma",
+  "name": "Sigma",
+  "models": ["SIGMA"],
+  "markers": ["DCIM/*SIGMA"],
+  "sources": ["DCIM"],
+  "types": {
+    "jpg": "JPG",
+    "dng": "RAW",
+    "x3f": "RAW",
+    "mov": "VID",
+    "wav": "AUDIO"
+  },
+  "layout": "{date}/{type}",
+  "date_from_name": false
+}

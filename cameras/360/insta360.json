@@ -1,6 +1,6 @@
 {
   "id": "insta360",
-  "name": "Insta360",
+  "name": "Insta360 X / Ace / GO",
   "models": ["Insta360"],
   "markers": ["DCIM/Camera01"],
   "sources": ["DCIM"],

@@ -1,0 +1,16 @@
+{
+  "id": "dji-osmo-360",
+  "name": "DJI Osmo 360",
+  "models": ["DJI Osmo360", "DJI Osmo 360"],
+  "markers": ["DCIM/DJI_*", "DCIM/DJI_*/*.OSV"],
+  "sources": ["DCIM"],
+  "types": {
+    "osv": "VID",
+    "mp4": "VID",
+    "jpg": "JPG",
+    "dng": "RAW",
+    "lrf": ""
+  },
+  "layout": "{date}/{type}",
+  "date_from_name": true
+}
