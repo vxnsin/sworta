@@ -1,0 +1,17 @@
+{
+  "id": "insta360-ace",
+  "name": "Insta360 Ace Pro / GO",
+  "models": ["Insta360 Ace", "Insta360 GO"],
+  "markers": [],
+  "sources": ["DCIM"],
+  "types": {
+    "mp4": "VID",
+    "insv": "VID",
+    "jpg": "JPG",
+    "insp": "JPG",
+    "dng": "RAW",
+    "lrv": ""
+  },
+  "layout": "{date}/{type}",
+  "date_from_name": true
+}

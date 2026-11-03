@@ -680,6 +680,22 @@ mod tests {
     }
 
     #[test]
+    fn insta360_ace_by_its_model() {
+        let cams = cams();
+        let best = |model: &str| {
+            let n = norm(model);
+            cams.iter()
+                .flat_map(|c| c.models.iter().map(move |p| (c, norm(p))))
+                .filter(|(_, p)| !p.is_empty() && n.contains(p.as_str()))
+                .max_by_key(|(_, p)| p.len())
+                .map(|(c, _)| c.id.clone())
+        };
+        assert_eq!(best("Insta360 Ace Pro 2").as_deref(), Some("insta360-ace"));
+        assert_eq!(best("Insta360 GO 3S").as_deref(), Some("insta360-ace"));
+        assert_eq!(best("Insta360 X5").as_deref(), Some("insta360"));
+    }
+
+    #[test]
     fn remembered_card_wins() {
         let card = TempCard::new(&["DCIM/DJI_001/x.MP4"]);
         let cams = cams();
